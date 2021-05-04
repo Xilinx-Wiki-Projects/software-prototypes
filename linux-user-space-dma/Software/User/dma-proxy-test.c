@@ -320,7 +320,7 @@ int main(int argc, char *argv[])
 	}
 
 	rx_proxy_fd = open("/dev/dma_proxy_rx", O_RDWR);
-	if (tx_proxy_fd < 1) {
+	if (rx_proxy_fd < 1) {
 		printf("Unable to open DMA proxy device file");
 		exit(EXIT_FAILURE);
 	}
