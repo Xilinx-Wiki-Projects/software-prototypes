@@ -26,13 +26,16 @@
  * Transmit and receive buffers in that memory are mapped to user space such that the
  * application can send and receive data using DMA channels (transmit and receive).
  *
- * It has been tested with an AXI DMA system with transmit looped back to receive.
- * Since the AXI DMA transmit is a stream without any buffering it is throttled until
- * the receive channel is running.
+ * It has been tested with AXI DMA and AXI MCDMA systems with transmit looped back to
+ * receive. Note that the receive channel of the AXI DMA throttles the transmit with
+ * a loopback while this is not the case with AXI MCDMA.
  *
  * Build information: The pthread library is required for linking. Compiler optimization
  * makes a very big difference in performance with -O3 being good performance and
  * -O0 being very low performance.
+ *
+ * The user should tune the number of channels and channel names to match the device
+ * tree.
  *
  * More complete documentation is contained in the device driver (dma-proxy.c).
  */
@@ -49,19 +52,37 @@
 #include <stdint.h>
 #include <signal.h>
 #include <sched.h>
+#include <time.h>
+#include <errno.h>
+#include <sys/param.h>
 
 #include "dma-proxy.h"
 
-static int verify;
-static unsigned int access_buffer[BUFFER_SIZE / sizeof(unsigned int)];
-static struct channel_buffer *tx_proxy_buffer_p;
-static int tx_proxy_fd;
-static int test_size;
-static volatile int tx_wait = 1;
-static volatile int stop = 0;
-static volatile int rx_counter = 0;
-static pthread_t tx_tid;
+/* The user must tune the application number of channels to match the proxy driver device tree
+ * and the names of each channel must match the dma-names in the device tree for the proxy
+ * driver node. The number of channels can be less than the number of names as the other
+ * channels will just not be used in testing.
+ */
+#define TX_CHANNEL_COUNT 1
+#define RX_CHANNEL_COUNT 1
 
+const char *tx_channel_names[] = { "dma_proxy_tx", /* add unique channel names here */ };
+const char *rx_channel_names[] = { "dma_proxy_rx", /* add unique channel names here */ };
+
+/* Internal data which should work without tuning */
+
+struct channel {
+	struct channel_buffer *buf_ptr;
+	int fd;
+	pthread_t tid;
+};
+
+static int verify;
+static int test_size;
+static volatile int stop = 0;
+int num_transfers;
+
+struct channel tx_channels[TX_CHANNEL_COUNT], rx_channels[RX_CHANNEL_COUNT];
 
 /*******************************************************************************************************************/
 /* Handle a control C or kill, maybe the actual signal number coming in has to be more filtered?
@@ -91,17 +112,10 @@ static uint64_t get_posix_clock_time_usec ()
  * The following function is the transmit thread to allow the transmit and the receive channels to be
  * operating simultaneously. Some of the ioctl calls are blocking so that multiple threads are required.
  */
-void *tx_thread(int *num_transfers_input)
+void tx_thread(struct channel *channel_ptr)
 {
 	int i, counter = 0, buffer_id, in_progress_count = 0;
-	int num_transfers = *num_transfers_input;
 	int stop_in_progress = 0;
-	id_t pid;
-
-	/* Wait until the receive processing has some transfers in the queue to start sending to prevent
-	 * a loss of data
-	 */
-	while (tx_wait);
 
 	// Start all buffers being sent
 
@@ -110,16 +124,16 @@ void *tx_thread(int *num_transfers_input)
 		/* Set up the length for the DMA transfer and initialize the transmit
 		 * buffer to a known pattern.
 		 */
-		tx_proxy_buffer_p[buffer_id].length = test_size;
+		channel_ptr->buf_ptr[buffer_id].length = test_size;
 
 		if (verify)
-			for (i = 0; i < test_size / sizeof(unsigned int); i++)
-				tx_proxy_buffer_p[buffer_id].buffer[i] = i + in_progress_count;
+			for (i = 0; i < 1; i++) // test_size / sizeof(unsigned int); i++)
+				channel_ptr->buf_ptr[buffer_id].buffer[i] = i + in_progress_count;
 
 		/* Start the DMA transfer and this call is non-blocking
 		 *
 		 */
-		ioctl(tx_proxy_fd, START_XFER, &buffer_id);
+		ioctl(channel_ptr->fd, START_XFER, &buffer_id);
 
 		/* Keep track of the number of transfers that are in progress and if the number is less
 		 * than the number of channel buffers then stop before all channel buffers are used
@@ -137,8 +151,8 @@ void *tx_thread(int *num_transfers_input)
 		/* Perform the DMA transfer and check the status after it completes
 		 * as the call blocks til the transfer is done.
 		 */
-		ioctl(tx_proxy_fd, FINISH_XFER, &buffer_id);
-		if (tx_proxy_buffer_p[buffer_id].status != PROXY_NO_ERROR)
+		ioctl(channel_ptr->fd, FINISH_XFER, &buffer_id);
+		if (channel_ptr->buf_ptr[buffer_id].status != PROXY_NO_ERROR)
 			printf("Proxy tx transfer error\n");
 
 		/* Keep track of how many transfers are in progress and how many completed
@@ -160,20 +174,18 @@ void *tx_thread(int *num_transfers_input)
 		if (stop & !stop_in_progress) {
 			stop_in_progress = 1;
 			num_transfers = counter + RX_BUFFER_COUNT;
-			*num_transfers_input = num_transfers;
-			printf("Tx detected stop condition, number of transfers: %d\n", *num_transfers_input);
 		}
 
 		/* If the ones in progress will complete the count then don't start more */
 
 		if ((counter + in_progress_count) >= num_transfers)
-			goto end_tx_loop;
+			goto end_tx_loop0;
 
 		/* Initialize the buffer and perform the DMA transfer, check the status after it completes
 		 * as the call blocks til the transfer is done.
 		 */
 		if (verify) {
-			unsigned int *buffer = &tx_proxy_buffer_p[buffer_id].buffer;
+			unsigned int *buffer = (unsigned int *)&channel_ptr->buf_ptr[buffer_id].buffer;
 			for (i = 0; i < test_size / sizeof(unsigned int); i++)
 				buffer[i] = i + ((TX_BUFFER_COUNT / BUFFER_INCREMENT) - 1) + counter;
 		}
@@ -181,11 +193,11 @@ void *tx_thread(int *num_transfers_input)
 		/* Restart the completed channel buffer to start another transfer and keep
 		 * track of the number of transfers in progress
 		 */
-		ioctl(tx_proxy_fd, START_XFER, &buffer_id);
+		ioctl(channel_ptr->fd, START_XFER, &buffer_id);
 
 		in_progress_count++;
 
-end_tx_loop:
+end_tx_loop0:
 
 		/* Flip to next buffer and wait for it treating them as a circular list
 		 */
@@ -194,44 +206,90 @@ end_tx_loop:
 	}
 }
 
-/*******************************************************************************************************************/
-/*
- * Run a performance access test to verify the performance of normal memory (cached) to compare with
- * the DMA allocated memory as they should be the same when the system is hardware coherent.
- */
-void access_test(char *name, unsigned int *test, int iterations)
+void rx_thread(struct channel *channel_ptr)
 {
-	int i, j;
-	uint64_t start_time, end_time, time_diff;
-	int mb_sec;
-	unsigned int test_counter = 0;
+	int in_progress_count = 0, buffer_id = 0;
+	int rx_counter = 0;
 
-	/* Initialize a test buffer just to allow the test to do something very similar to the normal
-	 * verify for the transfers
-	 */
-	for (i = 0; i < test_size / sizeof(unsigned int); i++)
-		test[i] = test_counter + i;
+	// Start all buffers being received
 
-	start_time = get_posix_clock_time_usec();
+	for (buffer_id = 0; buffer_id < RX_BUFFER_COUNT; buffer_id += BUFFER_INCREMENT) {
 
-	/* Perform the access test doing a similar access to the real transfer test so that we can
-	 * show the best performance that should ever be possible
-	 */
-	for (j = 0; j < iterations; j++) {
-		for (i = 0; i < test_size / sizeof(unsigned int); i++)
-			if (test[i] != (test_counter + i))
-				printf("performance test, should not hit this code\n");
+		/* Don't worry about initializing the receive buffers as the pattern used in the
+		 * transmit buffers is unique across every transfer so it should catch errors.
+		 */
+		channel_ptr->buf_ptr[buffer_id].length = test_size;
+
+		ioctl(channel_ptr->fd, START_XFER, &buffer_id);
+
+		/* Handle the case of a specified number of transfers that is less than the number
+		 * of buffers
+		 */
+		if (++in_progress_count >= num_transfers)
+			break;
 	}
 
-	/* Calculate all the stats for the test */
+	buffer_id = 0;
 
-	end_time = get_posix_clock_time_usec();
-	time_diff = end_time - start_time;
-	mb_sec = ((1000000 / (double)time_diff) * ((double)test_size) * iterations) / 1000000;
+	/* Finish each queued up receive buffer and keep starting the buffer over again
+	 * until all the transfers are done
+	 */
+	while (1) {
 
-	printf("    %s Time: %d microseconds, ", name, time_diff);
-	printf("Test size: %d KB, ", (test_size / 1024) * iterations);
-	printf("Throughput: %d MB / sec \n", mb_sec);
+		ioctl(channel_ptr->fd, FINISH_XFER, &buffer_id);
+
+		if (channel_ptr->buf_ptr[buffer_id].status != PROXY_NO_ERROR) {
+			printf("Proxy rx transfer error, # transfers %d, # completed %d, # in progress %d\n",
+						num_transfers, rx_counter, in_progress_count);
+			exit(1);
+		}
+
+		/* Verify the data received matches what was sent (tx is looped back to tx)
+		 * A unique value in the buffers is used across all transfers
+		 */
+		if (verify) {
+			unsigned int *buffer = &channel_ptr->buf_ptr[buffer_id].buffer;
+			int i;
+			for (i = 0; i < 1; i++) // test_size / sizeof(unsigned int); i++) this is slow
+				if (buffer[i] != i + rx_counter) {
+					printf("buffer not equal, index = %d, data = %d expected data = %d\n", i,
+						buffer[i], i + rx_counter);
+					break;
+				}
+		}
+
+		/* Keep track how many transfers are in progress so that only the specified number
+		 * of transfers are attempted
+		 */
+		in_progress_count--;
+
+		/* If all the transfers are done then exit */
+
+		if (++rx_counter >= num_transfers)
+			break;
+
+		/* If the ones in progress will complete the number of transfers then don't start more
+		 * but finish the ones that are already started
+		 */
+		if ((rx_counter + in_progress_count) >= num_transfers)
+			goto end_rx_loop0;
+
+		/* Start the next buffer again with another transfer keeping track of
+		 * the number in progress but not finished
+		 */
+		ioctl(channel_ptr->fd, START_XFER, &buffer_id);
+
+		in_progress_count++;
+
+	end_rx_loop0:
+
+		/* Flip to next buffer treating them as a circular list, and possibly skipping some
+		 * to show the results when prefetching is not happening
+		 */
+		buffer_id += BUFFER_INCREMENT;
+		buffer_id %= RX_BUFFER_COUNT;
+
+	}
 }
 
 /*******************************************************************************************************************/
@@ -241,31 +299,26 @@ void access_test(char *name, unsigned int *test, int iterations)
  */
 void setup_threads(int *num_transfers)
 {
-	pthread_attr_t tattr;
-	int newprio = 20;
+	pthread_attr_t tattr_tx;
+	int newprio = 20, i;
 	struct sched_param param;
 
 	/* The transmit thread should be lower priority than the receive
 	 * Get the default attributes and scheduling param
 	 */
-	pthread_attr_init (&tattr);
-	pthread_attr_getschedparam (&tattr, &param);
+	pthread_attr_init (&tattr_tx);
+	pthread_attr_getschedparam (&tattr_tx, &param);
 
 	/* Set the transmit priority to the lowest
 	 */
 	param.sched_priority = newprio;
-	pthread_attr_setschedparam (&tattr, &param);
+	pthread_attr_setschedparam (&tattr_tx, &param);
 
-	/* Create the thread for the transmit processing passing the number of transactions to it, start it
-	 * before the receive processing is started so that the total time taken does not include the
-	 * creation of a thread
-	 */
-	pthread_create(&tx_tid, &tattr, tx_thread, num_transfers);
+	for (i = 0; i < RX_CHANNEL_COUNT; i++)
+		pthread_create(&rx_channels[i].tid, NULL, rx_thread, (void *)&rx_channels[i]);
 
-	/* Set the calling thread priority to the maximum as it should be the receive processing
-	 */
-	param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-	pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+	for (i = 0; i < TX_CHANNEL_COUNT; i++)
+		pthread_create(&tx_channels[i].tid, &tattr_tx, tx_thread, (void *)&tx_channels[i]);
 }
 
 /*******************************************************************************************************************/
@@ -274,12 +327,11 @@ void setup_threads(int *num_transfers)
  */
 int main(int argc, char *argv[])
 {
-	struct channel_buffer *rx_proxy_buffer_p;
-	int rx_proxy_fd, i;
-	int in_progress_count = 0, buffer_id = 0;
+	int i;
 	uint64_t start_time, end_time, time_diff;
 	int mb_sec;
-	int num_transfers;
+	int buffer_id = 0;
+	int max_channel_count = MAX(TX_CHANNEL_COUNT, RX_CHANNEL_COUNT);
 
 	printf("DMA proxy test\n");
 
@@ -309,148 +361,73 @@ int main(int argc, char *argv[])
 		verify = atoi(argv[3]);
 	printf("Verify = %d\n", verify);
 
-	/* Open the DMA proxy device for the transmit and receive channels, the proxy driver is a character device
-	 * that creates these device nodes
- 	 */
-	tx_proxy_fd = open("/dev/dma_proxy_tx", O_RDWR);
+	/* Open the file descriptors for each tx channel and map the kernel driver memory into user space */
 
-	if (tx_proxy_fd < 1) {
-		printf("Unable to open DMA proxy device file");
-		exit(EXIT_FAILURE);
+	for (i = 0; i < TX_CHANNEL_COUNT; i++) {
+		char channel_name[64] = "/dev/";
+		strcat(channel_name, tx_channel_names[i]);
+		tx_channels[i].fd = open(channel_name, O_RDWR);
+		if (tx_channels[i].fd < 1) {
+			printf("Unable to open DMA proxy device file: %s\r", channel_name);
+			exit(EXIT_FAILURE);
+		}
+		tx_channels[i].buf_ptr = (struct channel_buffer *)mmap(NULL, sizeof(struct channel_buffer) * TX_BUFFER_COUNT,
+										PROT_READ | PROT_WRITE, MAP_SHARED, tx_channels[i].fd, 0);
+		if (tx_channels[i].buf_ptr == MAP_FAILED) {
+			printf("Failed to mmap tx channel\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
-	rx_proxy_fd = open("/dev/dma_proxy_rx", O_RDWR);
-	if (rx_proxy_fd < 1) {
-		printf("Unable to open DMA proxy device file");
-		exit(EXIT_FAILURE);
+	/* Open the file descriptors for each rx channel and map the kernel driver memory into user space */
+
+	for (i = 0; i < RX_CHANNEL_COUNT; i++) {
+		char channel_name[64] = "/dev/";
+		strcat(channel_name, rx_channel_names[i]);
+		rx_channels[i].fd = open(channel_name, O_RDWR);
+		if (rx_channels[i].fd < 1) {
+			printf("Unable to open DMA proxy device file: %s\r", channel_name);
+			exit(EXIT_FAILURE);
+		}
+		rx_channels[i].buf_ptr = (struct channel_buffer *)mmap(NULL, sizeof(struct channel_buffer) * RX_BUFFER_COUNT,
+										PROT_READ | PROT_WRITE, MAP_SHARED, rx_channels[i].fd, 0);
+		if (rx_channels[i].buf_ptr == MAP_FAILED) {
+			printf("Failed to mmap rx channel\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
-	/* Map the transmit and receive channels memory into user space so it's accessible. Note that each channel
-	 * has a set of channel buffers which are offsets from the start of the mapped channel memory.
- 	 */
-	tx_proxy_buffer_p = (struct channel_buffer *)mmap(NULL, sizeof(struct channel_buffer) * TX_BUFFER_COUNT,
-									PROT_READ | PROT_WRITE, MAP_SHARED, tx_proxy_fd, 0);
-
-	rx_proxy_buffer_p = (struct channel_buffer *)mmap(NULL, sizeof(struct channel_buffer) * RX_BUFFER_COUNT,
-									PROT_READ | PROT_WRITE, MAP_SHARED, rx_proxy_fd, 0);
-	if ((rx_proxy_buffer_p == MAP_FAILED) || (tx_proxy_buffer_p == MAP_FAILED)) {
-		printf("Failed to mmap\n");
-		exit(EXIT_FAILURE);
-	}
-
-	/* Do an performance access test to verify that the DMA memory is the same speed as normal memory
-	 * (cached), using 1000 iterations to get the best case numbers so that transfer test should not
-	 * be better
-	 */
-	access_test("Normal Buffer Performance:", access_buffer, 1000);
-	access_test("DMA Buffer Performance   :", rx_proxy_buffer_p[buffer_id].buffer, 1000);
-
-	setup_threads(&num_transfers);
+	/* Grab the start time to calculate performance then start the threads & transfers on all channels */
 
 	start_time = get_posix_clock_time_usec();
+	setup_threads(&num_transfers);
 
-	// Start all buffers being received
+	/* Do the minimum to know the transfers are done before getting the time for performance */
 
-	for (buffer_id = 0; buffer_id < RX_BUFFER_COUNT; buffer_id += BUFFER_INCREMENT) {
+	for (i = 0; i < RX_CHANNEL_COUNT; i++)
+		pthread_join(rx_channels[i].tid, NULL);
 
-		/* Don't worry about initializing the receive buffers as the pattern used in the
-		 * transmit buffers is unique across every transfer so it should catch errors.
-		 */
-		rx_proxy_buffer_p[buffer_id].length = test_size;
-
-		ioctl(rx_proxy_fd, START_XFER, &buffer_id);
-
-		/* Handle the case of a specified number of transfers that is less than the number
-		 * of buffers
-		 */
-		if (++in_progress_count >= num_transfers)
-			break;
-	}
-
-	/* Start the transmit thread now that receive buffers are queued up and started
-	 * and finish receiving the data in the 1st buffer. If the transmit starts before
-	 * the receive is ready there will be verify errors.
-	 */
-	tx_wait = 0;
-	buffer_id = 0;
-
-	/* Finish each queued up receive buffer and keep starting the buffer over again
-	 * until all the transfers are done
-	 */
-	while (1) {
-
-		ioctl(rx_proxy_fd, FINISH_XFER, &buffer_id);
-
-		if (rx_proxy_buffer_p[buffer_id].status != PROXY_NO_ERROR) {
-			printf("Proxy rx transfer error, # transfers %d, # completed %d, # in progress %d\n",
-						num_transfers, rx_counter, in_progress_count);
-			exit(1);
-		}
-
-		/* Verify the data received matches what was sent (tx is looped back to tx)
-		 * A unique value in the buffers is used across all transfers
-		 */
-		if (verify) {
-			unsigned int *buffer = &rx_proxy_buffer_p[buffer_id].buffer;
-			for (i = 0; i < test_size / sizeof(unsigned int); i++)
-				if (buffer[i] != i + rx_counter) {
-					printf("buffer not equal, index = %d, data = %d expected data = %d\n", i,
-						buffer[i], i + rx_counter);
-					break;
-				}
-		}
-
-		/* Keep track how many transfers are in progress so that only the specified number
-		 * of transfers are attempted
-		 */
-		in_progress_count--;
-
-		/* If all the transfers are done then exit */
-
-		if (++rx_counter >= num_transfers)
-			break;
-
-		/* If the ones in progress will complete the number of transfers then don't start more
-		 * but finish the ones that are already started
-		 */
-		if ((rx_counter + in_progress_count) >= num_transfers)
-			goto end_rx_loop;
-
-		/* Start the next buffer again with another transfer keeping track of
-		 * the number in progress but not finished
-		 */
-		ioctl(rx_proxy_fd, START_XFER, &buffer_id);
-
-		in_progress_count++;
-
-end_rx_loop:
-
-		/* Flip to next buffer treating them as a circular list, and possibly skipping some
-		 * to show the results when prefetching is not happening
-		 */
-		buffer_id += BUFFER_INCREMENT;
-		buffer_id %= RX_BUFFER_COUNT;
-	}
+	/* Grab the end time and calculate the performance */
 
 	end_time = get_posix_clock_time_usec();
 	time_diff = end_time - start_time;
-	mb_sec = ((1000000 / (double)time_diff) * (num_transfers * (double)test_size)) / 1000000;
+	mb_sec = ((1000000 / (double)time_diff) * (num_transfers * max_channel_count * (double)test_size)) / 1000000;
 
 	printf("Time: %d microseconds\n", time_diff);
-	printf("Transfer size: %d KB\n", (long long)(num_transfers) * (test_size / 1024));
+	printf("Transfer size: %d KB\n", (long long)(num_transfers) * (test_size / 1024) * max_channel_count);
 	printf("Throughput: %d MB / sec \n", mb_sec);
 
-	/* Wait for the transmit thread to finish
-	 */
-	pthread_join(tx_tid, NULL);
+	/* Clean up all the channels before leaving */
 
-	/* Unmap the proxy channel interface memory and close the device files before leaving
-	 */
-	munmap(tx_proxy_buffer_p, sizeof(struct channel_buffer));
-	munmap(rx_proxy_buffer_p, sizeof(struct channel_buffer));
-
-	close(tx_proxy_fd);
-	close(rx_proxy_fd);
+	for (i = 0; i < TX_CHANNEL_COUNT; i++) {
+		pthread_join(tx_channels[i].tid, NULL);
+		munmap(tx_channels[i].buf_ptr, sizeof(struct channel_buffer));
+		close(tx_channels[i].fd);
+	}
+	for (i = 0; i < RX_CHANNEL_COUNT; i++) {
+		munmap(rx_channels[i].buf_ptr, sizeof(struct channel_buffer));
+		close(rx_channels[i].fd);
+	}
 
 	printf("DMA proxy test complete\n");
 

@@ -17,11 +17,11 @@
 /* DMA Proxy
  *
  * This module is designed to be a small example of a DMA device driver that is
- * a client to the DMA Engine using the AXI DMA driver. It serves as a proxy for
- * kernel space DMA control to a user space application.
+ * a client to the DMA Engine using the AXI DMA / MCDMA driver. It serves as a proxy
+ * for kernel space DMA control to a user space application.
  *
  * A zero copy scheme is provided by allowing user space to mmap a kernel allocated
- * memory region into user space, referred to as a set of channel buffers.Ioctl functions 
+ * memory region into user space, referred to as a set of channel buffers. Ioctl functions 
  * are provided to start a DMA transfer (non-blocking), finish a DMA transfer (blocking) 
  * previously started, or start and finish a DMA transfer blocking until it is complete.
  * An input argument which specifies a channel buffer number (0 - N) to be used for the
@@ -43,35 +43,64 @@
  * There is an associated user space application, dma_proxy_test.c, and dma_proxy.h
  * that works with this device driver.
  *
- * The hardware design was tested with an AXI DMA with scatter gather and
+ * The hardware design was tested with an AXI DMA / MCDMA  with scatter gather and
  * with the transmit channel looped back to the receive channel. It should
  * work with or without scatter gather as the scatter gather mentioned in the 
  * driver is only at the s/w framework level rather than in the hw.
  *
- * This driver is character driver which creates 2 devices that user space can
- * access for each DMA channel, /dev/dma_proxy_rx and /dev/dma_proxy_tx.
+ * This driver is character driver which creates devices that user space can
+ * access for each DMA channel, such as /dev/dma_proxy_rx and /dev/dma_proxy_tx.
+ * The number and names of channels are taken from the device tree.
+ * Multiple instances of the driver (with multiple IPs) are also supported.
 
  * An internal test mode is provided to allow it to be self testing without the 
  * need for a user space application and this mode is good for making bigger
  * changes to this driver.
  *
  * This driver is designed to be simple to help users get familiar with how to 
- * use the DMA driver provided by Xilinx which uses the Linux DMA Engine. In order
- * to get the maximum performance without a loss of receive data the hardware design
- * should incorporate AXI stream FIFOs prior to the DMA receive channel.
+ * use the DMA driver provided by Xilinx which uses the Linux DMA Engine. 
  *
- * To use this driver a node must be added into the device tree.  Add the 
- * following node while adjusting the dmas property to match the name of 
- * the AXI DMA node.
+ * To use this driver a node must be added into the device tree.  Add a 
+ * node similar to the examples below adjusting the dmas property to match the
+ * name of the AXI DMA / MCDMA node.
+ * 
+ * The dmas property contains pairs with the first of each pair being a reference
+ * to the DMA IP in the device tree and the second of each pair being the
+ * channel of the DMA IP. For the AXI DMA IP the transmit channel is always 0 and
+ * the receive is always 1. For the AXI MCDMA IP the 1st transmit channel is
+ * always 0 and receive channels start at 16 since there can be a maximum of 16
+ * transmit channels. Each name in the dma-names corresponds to a pair in the dmas
+ * property and is only a logical name that allows user space access to the channel
+ * such that the name can be any name as long as it is unique.
+ *
+ *	For h/w coherent systems with MPSoC, the property dma-coherent can be added
+ * to the node in the device tree. 
+ * 
+ * Example device tree nodes: 
+ *
+ * For AXI DMA with transmit and receive channels with a loopback in hardware
  * 
  * dma_proxy {
- *    compatible ="xlnx,dma_proxy";
- *    dmas = <&axi_dma_0 0
- *            &axi_dma_0 1>;
- *    dma-names = "dma_proxy_tx", "dma_proxy_rx";
- *		dma-coherent;		when MPSOC is configured coherent 
- * }
+ *   compatible ="xlnx,dma_proxy";
+ *   dmas = <&axi_dma_1_loopback 0  &axi_dma_1_loopback 1>;
+ *   dma-names = "dma_proxy_tx", "dma_proxy_rx";
+ * };
  *
+ * For AXI DMA with only the receive channel
+ * 
+ * dma_proxy2 {
+ *   compatible ="xlnx,dma_proxy";
+ *   dmas = <&axi_dma_0_noloopback 1>;
+ *   dma-names = "dma_proxy_rx_only";
+ * };
+ *
+ * For AXI MCDMA with two channels 
+ *
+ * dma_proxy3 {
+ *   compatible ="xlnx,dma_proxy";
+ *   dmas = <&axi_mcdma_0 0  &axi_mcdma_0 16 &axi_mcdma_0 1 &axi_mcdma_0 17> ;
+ *   dma-names = "dma_proxy_tx_0", "dma_proxy_rx_0", "dma_proxy_tx_1", "dma_proxy_rx_1";
+ * };
  */
 
 #include <linux/dmaengine.h>
@@ -94,15 +123,14 @@
 MODULE_LICENSE("GPL");
 
 #define DRIVER_NAME 			"dma_proxy"
-#define CHANNEL_COUNT 		2
 #define TX_CHANNEL			0
 #define RX_CHANNEL			1
 #define ERROR 					-1
-#define NOT_LAST_CHANNEL 	0
-#define LAST_CHANNEL 		1
 #define TEST_SIZE 			1024
 
 /* The following module parameter controls if the internal test runs when the module is inserted.
+ * Note that this test requires a transmit and receive channel to function and uses the first
+ * transmit and receive channnels when multiple channels exist.
  */
 static unsigned internal_test = 0;
 module_param(internal_test, int, S_IRUGO);
@@ -133,9 +161,14 @@ struct dma_proxy_channel {
 	int bdindex;
 };
 
-/* Allocate the channels for this example statically rather than dynamically for simplicity.
- */
-static struct dma_proxy_channel channels[CHANNEL_COUNT];
+struct dma_proxy {
+	int channel_count;
+	struct dma_proxy_channel *channels;
+	char **names;
+	struct work_struct work;
+};
+
+static int total_count;
 
 /* Handle a callback and indicate the DMA transfer is complete to another
  * thread of control
@@ -223,52 +256,53 @@ static void wait_for_transfer(struct dma_proxy_channel *pchannel_p)
  * driver without any user space. It uses the first channel buffer for the transmit and receive.
  * If this works but the user application does not then the user application is at fault.
  */
-static void tx_test(struct work_struct *unused)
+static void tx_test(struct work_struct *local_work)
 {
+	struct dma_proxy *lp;
+	lp = container_of(local_work, struct dma_proxy, work);
 
 	/* Use the 1st buffer for the test
 	 */
-	channels[TX_CHANNEL].buffer_table_p[0].length = TEST_SIZE;
-	channels[TX_CHANNEL].bdindex = 0;
+	lp->channels[TX_CHANNEL].buffer_table_p[0].length = TEST_SIZE;
+	lp->channels[TX_CHANNEL].bdindex = 0;
 
-	start_transfer(&channels[TX_CHANNEL]);
-	wait_for_transfer(&channels[TX_CHANNEL]);
+	start_transfer(&lp->channels[TX_CHANNEL]);
+	wait_for_transfer(&lp->channels[TX_CHANNEL]);
 }
 
-static void test(void)
+static void test(struct dma_proxy *lp)
 {
 	int i;
-	struct work_struct work;
-	
+
 	printk("Starting internal test\n");
 
 	/* Initialize the buffers for the test
 	 */
 	for (i = 0; i < TEST_SIZE / sizeof(unsigned int); i++) {
-		channels[TX_CHANNEL].buffer_table_p[0].buffer[i] = i;
-		channels[RX_CHANNEL].buffer_table_p[0].buffer[i] = 0;
+		lp->channels[TX_CHANNEL].buffer_table_p[0].buffer[i] = i;
+		lp->channels[RX_CHANNEL].buffer_table_p[0].buffer[i] = 0;
 	}
 
 	/* Since the transfer function is blocking the transmit channel is started from a worker
 	 * thread
 	 */
-	INIT_WORK(&work, tx_test);
-	schedule_work(&work);
+	INIT_WORK(&lp->work, tx_test);
+	schedule_work(&lp->work);
 
 	/* Receive the data that was just sent and looped back
 	 */
-	channels[RX_CHANNEL].buffer_table_p->length = TEST_SIZE;
-	channels[TX_CHANNEL].bdindex = 0;
+	lp->channels[RX_CHANNEL].buffer_table_p->length = TEST_SIZE;
+	lp->channels[TX_CHANNEL].bdindex = 0;
 
-	start_transfer(&channels[RX_CHANNEL]);
-	wait_for_transfer(&channels[RX_CHANNEL]);
+	start_transfer(&lp->channels[RX_CHANNEL]);
+	wait_for_transfer(&lp->channels[RX_CHANNEL]);
 
 	/* Verify the receiver buffer matches the transmit buffer to
 	 * verify the transfer was good
 	 */
 	for (i = 0; i < TEST_SIZE / sizeof(unsigned int); i++)
-		if (channels[TX_CHANNEL].buffer_table_p[0].buffer[i] !=
-			channels[RX_CHANNEL].buffer_table_p[0].buffer[i]) {
+		if (lp->channels[TX_CHANNEL].buffer_table_p[0].buffer[i] !=
+			lp->channels[RX_CHANNEL].buffer_table_p[0].buffer[i]) {
 			printk("buffers not equal, first index = %d\n", i);
 			break;
 		}
@@ -432,14 +466,17 @@ init_error1:
 /* Exit the character device by freeing up the resources that it created and
  * disconnecting itself from the kernel.
  */
-static void cdevice_exit(struct dma_proxy_channel *pchannel_p, int last_channel)
+static void cdevice_exit(struct dma_proxy_channel *pchannel_p)
 {
 	/* Take everything down in the reverse order
 	 * from how it was created for the char device
 	 */
 	if (pchannel_p->proxy_device_p) {
 		device_destroy(pchannel_p->class_p, pchannel_p->dev_node);
-		if (last_channel)
+
+		/* If this is the last channel then get rid of the /sys/class/dma_proxy
+		 */
+		if (total_count == 1)
 			class_destroy(pchannel_p->class_p);
 
 		cdev_del(&pchannel_p->cdev);
@@ -494,35 +531,74 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 	 * ioctl but we will initialize it to be safe.
 	 */
 	pchannel_p->bdindex = 0;
-
 	if (!pchannel_p->buffer_table_p) {
 		dev_err(pchannel_p->dma_device_p, "DMA allocation error\n");
 		return ERROR;
 	}
 	return 0;
 }
-
 /* Initialize the dma proxy device driver module.
  */
 static int dma_proxy_probe(struct platform_device *pdev)
 {
-	int rc;
+	int rc, i;
+	struct dma_proxy *lp;
+	struct device *dev = &pdev->dev;
 
 	printk(KERN_INFO "dma_proxy module initialized\n");
+	
+	lp = (struct dma_proxy *) devm_kmalloc(&pdev->dev, sizeof(struct dma_proxy), GFP_KERNEL);
+	if (!lp) {
+		dev_err(dev, "Cound not allocate proxy device\n");
+		return -ENOMEM;
+	}
+	dev_set_drvdata(dev, lp);
 
-	/* Create the transmit and receive channels.
+	/* Figure out how many channels there are from the device tree based
+	 * on the number of strings in the dma-names property
 	 */
-	rc = create_channel(pdev, &channels[TX_CHANNEL], "dma_proxy_tx", DMA_MEM_TO_DEV);
+	lp->channel_count = device_property_read_string_array(&pdev->dev,
+						 "dma-names", NULL, 0);
+	if (lp->channel_count <= 0)
+		return 0;
 
-	if (rc) 
-		return rc;
+	printk("Device Tree Channel Count: %d\r\n", lp->channel_count);
 
-	rc = create_channel(pdev, &channels[RX_CHANNEL], "dma_proxy_rx", DMA_DEV_TO_MEM);
-	if (rc) 
+	/* Allocate the memory for channel names and then get the names
+    * from the device tree
+	 */
+	lp->names = devm_kmalloc_array(&pdev->dev, lp->channel_count, 
+			sizeof(char *), GFP_KERNEL);
+	if (!lp->names)
+		return -ENOMEM;
+
+	rc = device_property_read_string_array(&pdev->dev, "dma-names", 
+					(const char **)lp->names, lp->channel_count);
+	if (rc < 0)
 		return rc;
+	
+	/* Allocate the memory for the channels since the number is known.
+	 */
+	lp->channels = devm_kmalloc(&pdev->dev,
+			sizeof(struct dma_proxy_channel) * lp->channel_count, GFP_KERNEL);
+	if (!lp->channels)
+		return -ENOMEM;
+
+	/* Create the channels in the proxy. The direction does not matter
+	 * as the DMA channel has it inside it and uses it, other than this will not work 
+	 * for cyclic mode.
+	 */
+	for (i = 0; i < lp->channel_count; i++) {
+		printk("Creating channel %s\r\n", lp->names[i]);
+		rc = create_channel(pdev, &lp->channels[i], lp->names[i], DMA_MEM_TO_DEV);
+
+		if (rc) 
+			return rc;
+		total_count++;
+	}
 
 	if (internal_test)
-		test();
+		test(lp);
 	return 0;
 }
  
@@ -531,6 +607,8 @@ static int dma_proxy_probe(struct platform_device *pdev)
 static int dma_proxy_remove(struct platform_device *pdev)
 {
 	int i;
+	struct device *dev = &pdev->dev;
+	struct dma_proxy *lp = dev_get_drvdata(dev);
 
 	printk(KERN_INFO "dma_proxy module exited\n");
 
@@ -538,20 +616,19 @@ static int dma_proxy_remove(struct platform_device *pdev)
 	 * channel except for the last channel. Handle the last
 	 * channel seperately.
 	 */
-	for (i = 0; i < CHANNEL_COUNT - 1; i++) 
-		if (channels[i].proxy_device_p)
-			cdevice_exit(&channels[i], NOT_LAST_CHANNEL);
-
-	cdevice_exit(&channels[i], LAST_CHANNEL);
-
-	/* Take care of the DMA channels and the any buffers allocated
+	for (i = 0; i < lp->channel_count; i++) { 
+		if (lp->channels[i].proxy_device_p)
+			cdevice_exit(&lp->channels[i]);
+		total_count--;
+	}
+	/* Take care of the DMA channels and any buffers allocated
 	 * for the DMA transfers. The DMA buffers are using managed
 	 * memory such that it's automatically done.
 	 */
-	for (i = 0; i < CHANNEL_COUNT; i++)
-		if (channels[i].channel_p) {
-			channels[i].channel_p->device->device_terminate_all(channels[i].channel_p);
-			dma_release_channel(channels[i].channel_p);
+	for (i = 0; i < lp->channel_count; i++)
+		if (lp->channels[i].channel_p) {
+			lp->channels[i].channel_p->device->device_terminate_all(lp->channels[i].channel_p);
+			dma_release_channel(lp->channels[i].channel_p);
 		}
 	return 0;
 }
