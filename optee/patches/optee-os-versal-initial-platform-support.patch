@@ -1,0 +1,247 @@
+From 9ff22e1965ab70e060360ee8e5153067730fb5de Mon Sep 17 00:00:00 2001
+From: Ibai Erkiaga <ibai.erkiaga-elorza@xilinx.com>
+Date: Fri, 14 May 2021 17:38:26 +0100
+Subject: [PATCH] versal: initial platform support
+
+Initial Xilinx Versal platform support. It is based on the Zynq MPSoC
+platform support and supports the basic features.
+
+Signed-off-by: John Linn <linnj@xilinx.com>
+Signed-off-by: Ibai Erkiaga <ibai.erkiaga-elorza@xilinx.com>
+---
+ core/arch/arm/plat-versal/conf.mk           | 30 ++++++++
+ core/arch/arm/plat-versal/main.c            | 83 ++++++++++++++++++++
+ core/arch/arm/plat-versal/platform_config.h | 84 +++++++++++++++++++++
+ core/arch/arm/plat-versal/sub.mk            |  2 +
+ 4 files changed, 199 insertions(+)
+ create mode 100644 core/arch/arm/plat-versal/conf.mk
+ create mode 100644 core/arch/arm/plat-versal/main.c
+ create mode 100644 core/arch/arm/plat-versal/platform_config.h
+ create mode 100644 core/arch/arm/plat-versal/sub.mk
+
+diff --git a/core/arch/arm/plat-versal/conf.mk b/core/arch/arm/plat-versal/conf.mk
+new file mode 100644
+index 00000000..c86ea1fa
+--- /dev/null
++++ b/core/arch/arm/plat-versal/conf.mk
+@@ -0,0 +1,30 @@
++PLATFORM_FLAVOR ?= generic
++
++include core/arch/arm/cpu/cortex-armv8-0.mk
++
++$(call force,CFG_TEE_CORE_NB_CORE,2)
++$(call force,CFG_PL011,y)
++$(call force,CFG_GIC,y)
++$(call force,CFG_ARM_GICV3,y)
++$(call force,CFG_SECURE_TIME_SOURCE_CNTPCT,y)
++$(call force,CFG_WITH_ARM_TRUSTED_FW,y)
++
++# Disable core ASLR for two reasons:
++# 1. There is no source for ALSR seed, as ATF does not provide a
++#    DTB to OP-TEE. Hardware RNG is also not currently supported.
++# 2. OP-TEE does not boot with enabled CFG_CORE_ASLR.
++$(call force,CFG_CORE_ASLR,n)
++
++ifeq ($(CFG_ARM64_core),y)
++$(call force,CFG_WITH_LPAE,y)
++else
++$(call force,CFG_ARM32_core,y)
++endif
++
++CFG_TZDRAM_START ?= 0x60000000
++CFG_TZDRAM_SIZE  ?= 0x10000000
++CFG_SHMEM_START  ?= 0x70000000
++CFG_SHMEM_SIZE   ?= 0x10000000
++
++CFG_WITH_STATS ?= y
++CFG_CRYPTO_WITH_CE ?= n
+diff --git a/core/arch/arm/plat-versal/main.c b/core/arch/arm/plat-versal/main.c
+new file mode 100644
+index 00000000..9899a4cf
+--- /dev/null
++++ b/core/arch/arm/plat-versal/main.c
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: BSD-2-Clause
++/*
++ * Copyright (c) 2016, Xilinx Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <platform_config.h>
++
++#include <stdint.h>
++#include <string.h>
++
++#include <drivers/gic.h>
++#include <drivers/pl011.h>
++
++#include <arm.h>
++#include <console.h>
++#include <kernel/boot.h>
++#include <kernel/interrupt.h>
++#include <kernel/misc.h>
++#include <kernel/tee_time.h>
++#include <mm/core_memprot.h>
++#include <trace.h>
++
++static struct gic_data gic_data;
++static struct pl011_data console_data;
++
++register_phys_mem_pgdir(MEM_AREA_IO_SEC,
++			ROUNDDOWN(CONSOLE_UART_BASE, CORE_MMU_PGDIR_SIZE),
++			CORE_MMU_PGDIR_SIZE);
++
++register_phys_mem_pgdir(MEM_AREA_IO_SEC,
++			ROUNDDOWN(GIC_BASE, CORE_MMU_PGDIR_SIZE),
++			CORE_MMU_PGDIR_SIZE);
++
++register_phys_mem_pgdir(MEM_AREA_IO_SEC,
++			ROUNDDOWN(GIC_BASE + GICD_OFFSET, CORE_MMU_PGDIR_SIZE),
++			CORE_MMU_PGDIR_SIZE);
++
++void main_init_gic(void)
++{
++	vaddr_t gicc_base, gicd_base;
++
++	gicc_base = (vaddr_t)phys_to_virt(GIC_BASE + GICC_OFFSET,
++					  MEM_AREA_IO_SEC);
++	gicd_base = (vaddr_t)phys_to_virt(GIC_BASE + GICD_OFFSET,
++					  MEM_AREA_IO_SEC);
++	/* On ARMv8, GIC configuration is initialized in ARM-TF */
++	gic_init_base_addr(&gic_data, gicc_base, gicd_base);
++}
++
++void itr_core_handler(void)
++{
++	gic_it_handle(&gic_data);
++}
++
++void console_init(void)
++{
++	pl011_init(&console_data, CONSOLE_UART_BASE,
++		       CONSOLE_UART_CLK_IN_HZ, CONSOLE_BAUDRATE);
++	register_serial_console(&console_data.chip);
++}
+diff --git a/core/arch/arm/plat-versal/platform_config.h b/core/arch/arm/plat-versal/platform_config.h
+new file mode 100644
+index 00000000..f365a030
+--- /dev/null
++++ b/core/arch/arm/plat-versal/platform_config.h
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++/*
++ * Copyright (c) 2016, Xilinx Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ * this list of conditions and the following disclaimer.
++ *
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef PLATFORM_CONFIG_H
++#define PLATFORM_CONFIG_H
++
++#include <mm/generic_ram_layout.h>
++
++/* Make stacks aligned to data cache line length */
++#define STACK_ALIGNMENT		64
++
++#ifdef CFG_WITH_PAGER
++#error "Pager not supported for zynqmp"
++#endif
++
++#if defined(PLATFORM_FLAVOR_generic) \
++
++#define GIC_BASE		0xF9000000
++#define UART0_BASE		0xFF000000
++#define UART1_BASE		0xFF010000
++
++#define IT_UART0		50
++#define IT_UART1		51
++
++#define UART0_CLK_IN_HZ		100000000
++#define UART1_CLK_IN_HZ		100000000
++#define CONSOLE_UART_BASE	UART0_BASE
++#define IT_CONSOLE_UART		IT_UART0
++#define CONSOLE_UART_CLK_IN_HZ	UART0_CLK_IN_HZ
++
++#define DRAM0_BASE		0
++#define DRAM0_SIZE		0x80000000
++
++#define GICD_OFFSET		0
++#define GICC_OFFSET		0x40000
++
++#else
++#error "Unknown platform flavor"
++#endif
++
++#ifdef CFG_TEE_LOAD_ADDR
++#define TEE_LOAD_ADDR			CFG_TEE_LOAD_ADDR
++#else
++#define TEE_LOAD_ADDR			TEE_RAM_START
++#endif
++
++#ifndef UART_BAUDRATE
++#define UART_BAUDRATE		115200
++#endif
++#ifndef CONSOLE_BAUDRATE
++#define CONSOLE_BAUDRATE	UART_BAUDRATE
++#endif
++
++/* For virtual platforms where there isn't a clock */
++#ifndef CONSOLE_UART_CLK_IN_HZ
++#define CONSOLE_UART_CLK_IN_HZ	1
++#endif
++
++#endif /*PLATFORM_CONFIG_H*/
+diff --git a/core/arch/arm/plat-versal/sub.mk b/core/arch/arm/plat-versal/sub.mk
+new file mode 100644
+index 00000000..8ddc2fd4
+--- /dev/null
++++ b/core/arch/arm/plat-versal/sub.mk
+@@ -0,0 +1,2 @@
++global-incdirs-y += .
++srcs-y += main.c
+-- 
+2.17.1
+
