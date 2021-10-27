@@ -1,355 +1,112 @@
-From 29d343a7a21a7d06d8581f38d8372b06a4048166 Mon Sep 17 00:00:00 2001
+From 2669bc3c520f3c5f7ec3747802ea07bdd35885a2 Mon Sep 17 00:00:00 2001
 From: linnj <linnj@xilinx.com>
-Date: Wed, 20 Oct 2021 10:21:36 -0600
-Subject: [PATCH] adding hello_world TA to support u-boot testing
+Date: Wed, 20 Oct 2021 16:02:14 -0600
+Subject: [PATCH] adding trusted app test
 
+This specific test is using the hello world example.
 ---
- ta/hello_world/Android.mk               |   4 +
- ta/hello_world/Makefile                 |  12 ++
- ta/hello_world/hello_world_ta.c         | 155 ++++++++++++++++++++++++
- ta/hello_world/include/hello_world_ta.h |  43 +++++++
- ta/hello_world/sub.mk                   |   6 +
- ta/hello_world/user_ta.mk               |   2 +
- ta/hello_world/user_ta_header_defines.h |  66 ++++++++++
- 7 files changed, 288 insertions(+)
- create mode 100644 ta/hello_world/Android.mk
- create mode 100644 ta/hello_world/Makefile
- create mode 100644 ta/hello_world/hello_world_ta.c
- create mode 100644 ta/hello_world/include/hello_world_ta.h
- create mode 100644 ta/hello_world/sub.mk
- create mode 100644 ta/hello_world/user_ta.mk
- create mode 100644 ta/hello_world/user_ta_header_defines.h
+ cmd/Makefile |  1 +
+ cmd/tatest.c | 79 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 80 insertions(+)
+ create mode 100644 cmd/tatest.c
 
-diff --git a/ta/hello_world/Android.mk b/ta/hello_world/Android.mk
+diff --git a/cmd/Makefile b/cmd/Makefile
+index dd86675bf2..2e9d2909eb 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -10,6 +10,7 @@ obj-$(CONFIG_CMD_BOOTM) += bootm.o
+ obj-y += help.o
+ obj-y += panic.o
+ obj-y += version.o
++obj-y += tatest.o
+ 
+ # command
+ obj-$(CONFIG_CMD_ACPI) += acpi.o
+diff --git a/cmd/tatest.c b/cmd/tatest.c
 new file mode 100644
-index 00000000..a1ff14ab
+index 0000000000..a9f26739bd
 --- /dev/null
-+++ b/ta/hello_world/Android.mk
-@@ -0,0 +1,4 @@
-+LOCAL_PATH := $(call my-dir)
-+
-+local_module := 8aaaf200-2450-11e4-abe2-0002a5d5c51b.ta
-+include $(BUILD_OPTEE_MK)
-diff --git a/ta/hello_world/Makefile b/ta/hello_world/Makefile
-new file mode 100644
-index 00000000..45ad808d
---- /dev/null
-+++ b/ta/hello_world/Makefile
-@@ -0,0 +1,12 @@
-+CFG_TEE_TA_LOG_LEVEL ?= 4
-+
-+# The UUID for the Trusted Application
-+BINARY=8aaaf200-2450-11e4-abe2-0002a5d5c51b
-+
-+-include $(TA_DEV_KIT_DIR)/mk/ta_dev_kit.mk
-+
-+ifeq ($(wildcard $(TA_DEV_KIT_DIR)/mk/ta_dev_kit.mk), )
-+clean:
-+	@echo 'Note: $$(TA_DEV_KIT_DIR)/mk/ta_dev_kit.mk not found, cannot clean TA'
-+	@echo 'Note: TA_DEV_KIT_DIR=$(TA_DEV_KIT_DIR)'
-+endif
-diff --git a/ta/hello_world/hello_world_ta.c b/ta/hello_world/hello_world_ta.c
-new file mode 100644
-index 00000000..2423b303
---- /dev/null
-+++ b/ta/hello_world/hello_world_ta.c
-@@ -0,0 +1,155 @@
++++ b/cmd/tatest.c
+@@ -0,0 +1,79 @@
++// SPDX-License-Identifier: GPL-2.0+
 +/*
-+ * Copyright (c) 2016, Linaro Limited
-+ * All rights reserved.
-+ *
-+ * Redistribution and use in source and binary forms, with or without
-+ * modification, are permitted provided that the following conditions are met:
-+ *
-+ * 1. Redistributions of source code must retain the above copyright notice,
-+ * this list of conditions and the following disclaimer.
-+ *
-+ * 2. Redistributions in binary form must reproduce the above copyright notice,
-+ * this list of conditions and the following disclaimer in the documentation
-+ * and/or other materials provided with the distribution.
-+ *
-+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-+ * POSSIBILITY OF SUCH DAMAGE.
++ * Copyright 2000-2009
++ * Wolfgang Denk, DENX Software Engineering, wd@denx.de.
 + */
 +
-+#include <tee_internal_api.h>
-+#include <tee_internal_api_extensions.h>
++#include <common.h>
++#include <command.h>
++#include <tee.h>
++static struct udevice *tee;
++static u32 session;
 +
-+#include <hello_world_ta.h>
-+
-+/*
-+ * Called when the instance of the TA is created. This is the first call in
-+ * the TA.
-+ */
-+TEE_Result TA_CreateEntryPoint(void)
-+{
-+	DMSG("has been called");
-+
-+	return TEE_SUCCESS;
-+}
-+
-+/*
-+ * Called when the instance of the TA is destroyed if the TA has not
-+ * crashed or panicked. This is the last call in the TA.
-+ */
-+void TA_DestroyEntryPoint(void)
-+{
-+	DMSG("has been called");
-+}
-+
-+/*
-+ * Called when a new session is opened to the TA. *sess_ctx can be updated
-+ * with a value to be able to identify this session in subsequent calls to the
-+ * TA. In this function you will normally do the global initialization for the
-+ * TA.
-+ */
-+TEE_Result TA_OpenSessionEntryPoint(uint32_t param_types,
-+		TEE_Param __maybe_unused params[4],
-+		void __maybe_unused **sess_ctx)
-+{
-+	uint32_t exp_param_types = TEE_PARAM_TYPES(TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE);
-+
-+	DMSG("has been called");
-+
-+	if (param_types != exp_param_types)
-+		return TEE_ERROR_BAD_PARAMETERS;
-+
-+	/* Unused parameters */
-+	(void)&params;
-+	(void)&sess_ctx;
-+
-+	/*
-+	 * The DMSG() macro is non-standard, TEE Internal API doesn't
-+	 * specify any means to logging from a TA.
-+	 */
-+	IMSG("Hello World!\n");
-+
-+	/* If return value != TEE_SUCCESS the session will not be created. */
-+	return TEE_SUCCESS;
-+}
-+
-+/*
-+ * Called when a session is closed, sess_ctx hold the value that was
-+ * assigned by TA_OpenSessionEntryPoint().
-+ */
-+void TA_CloseSessionEntryPoint(void __maybe_unused *sess_ctx)
-+{
-+	(void)&sess_ctx; /* Unused parameter */
-+	IMSG("Goodbye!\n");
-+}
-+
-+static TEE_Result inc_value(uint32_t param_types,
-+	TEE_Param params[4])
-+{
-+	uint32_t exp_param_types = TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
-+						   TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE);
-+
-+	DMSG("has been called");
-+
-+	if (param_types != exp_param_types)
-+		return TEE_ERROR_BAD_PARAMETERS;
-+
-+	IMSG("Got value: %u from NW", params[0].value.a);
-+	params[0].value.a++;
-+	IMSG("Increase value to: %u", params[0].value.a);
-+
-+	return TEE_SUCCESS;
-+}
-+
-+static TEE_Result dec_value(uint32_t param_types,
-+	TEE_Param params[4])
-+{
-+	uint32_t exp_param_types = TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
-+						   TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE,
-+						   TEE_PARAM_TYPE_NONE);
-+
-+	DMSG("has been called");
-+
-+	if (param_types != exp_param_types)
-+		return TEE_ERROR_BAD_PARAMETERS;
-+
-+	IMSG("Got value: %u from NW", params[0].value.a);
-+	params[0].value.a--;
-+	IMSG("Decrease value to: %u", params[0].value.a);
-+
-+	return TEE_SUCCESS;
-+}
-+/*
-+ * Called when a TA is invoked. sess_ctx hold that value that was
-+ * assigned by TA_OpenSessionEntryPoint(). The rest of the paramters
-+ * comes from normal world.
-+ */
-+TEE_Result TA_InvokeCommandEntryPoint(void __maybe_unused *sess_ctx,
-+			uint32_t cmd_id,
-+			uint32_t param_types, TEE_Param params[4])
-+{
-+	(void)&sess_ctx; /* Unused parameter */
-+
-+	switch (cmd_id) {
-+	case TA_HELLO_WORLD_CMD_INC_VALUE:
-+		return inc_value(param_types, params);
-+	case TA_HELLO_WORLD_CMD_DEC_VALUE:
-+		return dec_value(param_types, params);
-+	default:
-+		return TEE_ERROR_BAD_PARAMETERS;
-+	}
-+}
-diff --git a/ta/hello_world/include/hello_world_ta.h b/ta/hello_world/include/hello_world_ta.h
-new file mode 100644
-index 00000000..8e402766
---- /dev/null
-+++ b/ta/hello_world/include/hello_world_ta.h
-@@ -0,0 +1,43 @@
-+/*
-+ * Copyright (c) 2016-2017, Linaro Limited
-+ * All rights reserved.
-+ *
-+ * Redistribution and use in source and binary forms, with or without
-+ * modification, are permitted provided that the following conditions are met:
-+ *
-+ * 1. Redistributions of source code must retain the above copyright notice,
-+ * this list of conditions and the following disclaimer.
-+ *
-+ * 2. Redistributions in binary form must reproduce the above copyright notice,
-+ * this list of conditions and the following disclaimer in the documentation
-+ * and/or other materials provided with the distribution.
-+ *
-+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-+ * POSSIBILITY OF SUCH DAMAGE.
-+ */
-+#ifndef TA_HELLO_WORLD_H
-+#define TA_HELLO_WORLD_H
-+
-+
-+/*
-+ * This UUID is generated with uuidgen
-+ * the ITU-T UUID generator at http://www.itu.int/ITU-T/asn1/uuid.html
-+ */
 +#define TA_HELLO_WORLD_UUID \
-+	{ 0x8aaaf200, 0x2450, 0x11e4, \
-+		{ 0xab, 0xe2, 0x00, 0x02, 0xa5, 0xd5, 0xc5, 0x1b} }
++        { 0x8aaaf200, 0x2450, 0x11e4, \
++                { 0xab, 0xe2, 0x00, 0x02, 0xa5, 0xd5, 0xc5, 0x1b} }
 +
-+/* The function IDs implemented in this TA */
-+#define TA_HELLO_WORLD_CMD_INC_VALUE		0
-+#define TA_HELLO_WORLD_CMD_DEC_VALUE		1
++static int ta_open_session(void)
++{
++	const struct tee_optee_ta_uuid uuid = TA_HELLO_WORLD_UUID;
++	struct tee_open_session_arg arg;
++	int rc;
 +
-+#endif /*TA_HELLO_WORLD_H*/
-diff --git a/ta/hello_world/sub.mk b/ta/hello_world/sub.mk
-new file mode 100644
-index 00000000..20d1e4db
---- /dev/null
-+++ b/ta/hello_world/sub.mk
-@@ -0,0 +1,6 @@
-+global-incdirs-y += include
-+global-incdirs-y += .
-+srcs-y += hello_world_ta.c
++	tee = tee_find_device(tee, NULL, NULL, NULL);
++	if (!tee)
++		return -ENODEV;
 +
-+# To remove a certain compiler flag, add a line like this
-+#cflags-template_ta.c-y += -Wno-strict-prototypes
-diff --git a/ta/hello_world/user_ta.mk b/ta/hello_world/user_ta.mk
-new file mode 100644
-index 00000000..aa5f4449
---- /dev/null
-+++ b/ta/hello_world/user_ta.mk
-@@ -0,0 +1,2 @@
-+user-ta-uuid := 8aaaf200-2450-11e4-abe2-0002a5d5c51b
-+user-ta-version := 0
-diff --git a/ta/hello_world/user_ta_header_defines.h b/ta/hello_world/user_ta_header_defines.h
-new file mode 100644
-index 00000000..3aad90e7
---- /dev/null
-+++ b/ta/hello_world/user_ta_header_defines.h
-@@ -0,0 +1,66 @@
-+/*
-+ * Copyright (c) 2016-2017, Linaro Limited
-+ * All rights reserved.
-+ *
-+ * Redistribution and use in source and binary forms, with or without
-+ * modification, are permitted provided that the following conditions are met:
-+ *
-+ * 1. Redistributions of source code must retain the above copyright notice,
-+ * this list of conditions and the following disclaimer.
-+ *
-+ * 2. Redistributions in binary form must reproduce the above copyright notice,
-+ * this list of conditions and the following disclaimer in the documentation
-+ * and/or other materials provided with the distribution.
-+ *
-+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-+ * POSSIBILITY OF SUCH DAMAGE.
-+ */
++	memset(&arg, 0, sizeof(arg));
++	tee_optee_ta_uuid_to_octets(arg.uuid, &uuid);
++	rc = tee_open_session(tee, &arg, 0, NULL);
++	if (!rc)
++		session = arg.session;
++	return 0;
++}
++#if 0
++static int do_tatest(struct cmd_tbl *cmdtp, int flag, int argc,
++		      char *const argv[])
++{
 +
-+/*
-+ * The name of this file must not be modified
-+ */
++	printf("Running TA\n");
++	ta_open_session();
++	tee_close_session(tee, session);
++	return 0;
++}
++#endif
 +
-+#ifndef USER_TA_HEADER_DEFINES_H
-+#define USER_TA_HEADER_DEFINES_H
++#define TA_HELLO_WORLD_CMD_INC_VALUE            0
 +
-+/* To get the TA UUID definition */
-+#include <hello_world_ta.h>
++static int do_tatest(struct cmd_tbl *cmdtp, int flag, int argc,
++		      char *const argv[])
++{
++	struct tee_param param[2];
++	struct tee_invoke_arg arg;
 +
-+#define TA_UUID				TA_HELLO_WORLD_UUID
++	printf("Running TA\n");
++	ta_open_session();
 +
-+/*
-+ * TA properties: multi-instance TA, no specific attribute
-+ * TA_FLAG_EXEC_DDR is meaningless but mandated.
-+ */
-+#define TA_FLAGS			TA_FLAG_EXEC_DDR
++	memset(&arg, 0, sizeof(arg));
++	arg.func = TA_HELLO_WORLD_CMD_INC_VALUE;
++	arg.session = session;
 +
-+/* Provisioned stack size */
-+#define TA_STACK_SIZE			(2 * 1024)
++	memset(param, 0, sizeof(param));
++	param[0].attr = TEE_PARAM_ATTR_TYPE_VALUE_INOUT;
++	param[0].u.value.a = 1;
 +
-+/* Provisioned heap size for TEE_Malloc() and friends */
-+#define TA_DATA_SIZE			(32 * 1024)
++	printf("TA value: %d\n", (int)param[0].u.value.a);
 +
-+/* The gpd.ta.version property */
-+#define TA_VERSION	"1.0"
++	tee_invoke_func(tee, &arg, 1, param);
 +
-+/* The gpd.ta.description property */
-+#define TA_DESCRIPTION	"Example of OP-TEE Hello World Trusted Application"
++	printf("TA value: %d\n", (int)param[0].u.value.a);
 +
-+/* Extra properties */
-+#define TA_CURRENT_TA_EXT_PROPERTIES \
-+    { "org.linaro.optee.examples.hello_world.property1", \
-+	USER_TA_PROP_TYPE_STRING, \
-+        "Some string" }, \
-+    { "org.linaro.optee.examples.hello_world.property2", \
-+	USER_TA_PROP_TYPE_U32, &(const uint32_t){ 0x0010 } }
++	tee_close_session(tee, session);
++	return 0;
++}
 +
-+#endif /* USER_TA_HEADER_DEFINES_H */
++U_BOOT_CMD(
++	tatest,	1,		1,	do_tatest,
++	"Run an OP-TEE TA",
++	""
++);
 -- 
 2.17.1
 
