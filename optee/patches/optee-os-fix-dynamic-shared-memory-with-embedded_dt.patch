@@ -1,0 +1,32 @@
+From 85037b736c8c7f540e31192a20a210c490527fe1 Mon Sep 17 00:00:00 2001
+From: linnj <linnj@xilinx.com>
+Date: Thu, 18 Nov 2021 14:57:36 -0700
+Subject: [PATCH] Fixed CFG_EMBED_DT with CFG_CORE_DYN_SHM such that u-boot
+ works
+
+It looks like this is a bug where dynamic shared memory does not work
+when using an embedded device tree. When using u-boot with the tee
+the capabilities come back from the tee saying that dynamic shared
+memory is disabled when it is configured in the build.
+
+Signed-off-by: John Linn <john.linn@xilinx.com>
+---
+ core/arch/arm/kernel/boot.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/arch/arm/kernel/boot.c b/core/arch/arm/kernel/boot.c
+index 09c1b811..58bf50cd 100644
+--- a/core/arch/arm/kernel/boot.c
++++ b/core/arch/arm/kernel/boot.c
+@@ -1132,7 +1132,7 @@ static void discover_nsec_memory(void)
+ 	const struct core_mmu_phys_mem *mem_begin = NULL;
+ 	const struct core_mmu_phys_mem *mem_end = NULL;
+ 	size_t nelems;
+-	void *fdt = get_external_dt();
++	void *fdt = get_dt();
+ 
+ 	if (fdt) {
+ 		mem = get_nsec_memory(fdt, &nelems);
+-- 
+2.17.1
+
