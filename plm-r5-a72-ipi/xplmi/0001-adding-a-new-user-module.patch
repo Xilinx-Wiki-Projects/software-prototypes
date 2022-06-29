@@ -1,0 +1,33 @@
+From ef4557aad35deb941264c6f3eda577ec9dd8abc6 Mon Sep 17 00:00:00 2001
+From: linnj <linnj@xilinx.com>
+Date: Wed, 29 Jun 2022 07:28:55 -0600
+Subject: [PATCH] adding a new user module
+
+---
+ lib/sw_services/xilplmi/src/xplmi_modules.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/lib/sw_services/xilplmi/src/xplmi_modules.h b/lib/sw_services/xilplmi/src/xplmi_modules.h
+index 7373634ea8..a3c83e1544 100644
+--- a/lib/sw_services/xilplmi/src/xplmi_modules.h
++++ b/lib/sw_services/xilplmi/src/xplmi_modules.h
+@@ -50,7 +50,7 @@ extern "C" {
+  */
+ 
+ /************************** Constant Definitions *****************************/
+-#define XPLMI_MAX_MODULES			(13U)
++#define XPLMI_MAX_MODULES			(14U)
+ #define XPLMI_MODULE_GENERIC_ID			(1U)
+ #define XPLMI_MODULE_XILPM_ID			(2U)
+ #define XPLMI_MODULE_SEM_ID			(3U)
+@@ -61,6 +61,7 @@ extern "C" {
+ #define XPLMI_MODULE_STL_ID			(10U)
+ #define XPLMI_MODULE_XILNVM_ID			(11U)
+ #define XPLMI_MODULE_XILPUF_ID			(12U)
++#define XPLMI_MODULE_USER_ID			(13U)
+ #define XPLMI_MODULE_COMMAND(FUNC)		{ (FUNC) }
+ 
+ /**************************** Type Definitions *******************************/
+-- 
+2.17.1
+

@@ -1,0 +1,34 @@
+From ff501b1ff5bc1aa672235c482981aae9657216d0 Mon Sep 17 00:00:00 2001
+From: linnj <linnj@xilinx.com>
+Date: Tue, 28 Jun 2022 16:26:03 -0600
+Subject: [PATCH] adding user module initialization
+
+---
+ lib/sw_apps/versal_plm/src/xplm_module.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/lib/sw_apps/versal_plm/src/xplm_module.c b/lib/sw_apps/versal_plm/src/xplm_module.c
+index 3359a86fd7..bf71a3e94f 100644
+--- a/lib/sw_apps/versal_plm/src/xplm_module.c
++++ b/lib/sw_apps/versal_plm/src/xplm_module.c
+@@ -71,6 +71,8 @@
+ #ifdef PLM_ENABLE_STL
+ #include "xplm_stl.h"
+ #endif
++#include "user_ipi_demo.h"
++
+ /************************** Constant Definitions *****************************/
+ 
+ /**************************** Type Definitions *******************************/
+@@ -145,6 +147,8 @@ int XPlm_ModuleInit(void *Arg)
+ 	Status = XSem_Init();
+ #endif
+ 
++	User_Init();
++
+ END:
+ 	return Status;
+ }
+-- 
+2.17.1
+
