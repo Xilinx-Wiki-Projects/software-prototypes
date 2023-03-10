@@ -364,7 +364,8 @@ static long ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	/* Get the bd index from the input argument as all commands require it
 	 */
-	copy_from_user(&pchannel_p->bdindex, (int *)arg, sizeof(pchannel_p->bdindex)); 
+	if(copy_from_user(&pchannel_p->bdindex, (int *)arg, sizeof(pchannel_p->bdindex)))
+		return -EINVAL;
 
 	/* Perform the DMA transfer on the specified channel blocking til it completes
 	 */
