@@ -338,6 +338,7 @@ static int local_open(struct inode *ino, struct file *file)
  */
 static int release(struct inode *ino, struct file *file)
 {
+#if 0
 	struct dma_proxy_channel *pchannel_p = (struct dma_proxy_channel *)file->private_data;
 	struct dma_device *dma_device = pchannel_p->channel_p->device;
 
@@ -346,7 +347,6 @@ static int release(struct inode *ino, struct file *file)
 	 * This is not working and causes an issue that may need investigation in the 
 	 * DMA driver at the lower level.
 	 */
-#if 0
 	dma_device->device_terminate_all(pchannel_p->channel_p);
 #endif
 	return 0;
@@ -360,7 +360,6 @@ static int release(struct inode *ino, struct file *file)
 static long ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct dma_proxy_channel *pchannel_p = (struct dma_proxy_channel *)file->private_data;
-	dma_addr_t test;
 
 	/* Get the bd index from the input argument as all commands require it
 	 */
