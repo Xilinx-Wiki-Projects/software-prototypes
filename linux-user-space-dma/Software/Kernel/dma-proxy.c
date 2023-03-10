@@ -494,12 +494,12 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 	/* Request the DMA channel from the DMA engine and then use the device from
 	 * the channel for the proxy channel also.
 	 */
+	pchannel_p->dma_device_p = &pdev->dev;
 	pchannel_p->channel_p = dma_request_slave_channel(&pdev->dev, name);
 	if (!pchannel_p->channel_p) {
 		dev_err(pchannel_p->dma_device_p, "DMA channel request error\n");
 		return ERROR;
 	}
-	pchannel_p->dma_device_p = &pdev->dev; 
 
 	/* Initialize the character device for the dma proxy channel
 	 */
