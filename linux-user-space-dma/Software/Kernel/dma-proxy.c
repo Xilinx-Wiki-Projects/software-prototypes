@@ -495,7 +495,7 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 	 * the channel for the proxy channel also.
 	 */
 	pchannel_p->dma_device_p = &pdev->dev;
-	pchannel_p->channel_p = dma_request_slave_channel(&pdev->dev, name);
+	pchannel_p->channel_p = dma_request_chan(&pdev->dev, name);
 	if (!pchannel_p->channel_p) {
 		dev_err(pchannel_p->dma_device_p, "DMA channel request error\n");
 		return ERROR;
