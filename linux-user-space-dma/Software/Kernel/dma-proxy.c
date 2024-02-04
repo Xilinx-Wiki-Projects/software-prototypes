@@ -29,15 +29,15 @@
  *
  * By default the kernel memory allocated for user space mapping is going to be 
  * non-cached at this time. Non-cached memory is pretty slow for the application.
- * A h/w coherent system for MPSOC has been tested and is recommended for higher
+ * A h/w coherent system for MPSoC has been tested and is recommended for higher
  * performance applications. 
  *
  * Hardware coherency requires the following items in the system as documented on the 
  * Xilinx wiki and summarized below::
  *   The AXI DMA read and write channels AXI signals must be tied to the correct state to
  *    generate coherent transactions.
- *   An HPC slave port on MPSOC is required
- *   The CCI of MPSOC must be initialized prior to the APU booting Linux
+ *   An HPC slave port on MPSoC is required
+ *   The CCI of MPSoC must be initialized prior to the APU booting Linux
  *   A dma-coherent property is added in the device tree for the proxy driver.
  *
  * There is an associated user space application, dma_proxy_test.c, and dma_proxy.h
@@ -122,11 +122,13 @@
 
 MODULE_LICENSE("GPL");
 
+#define TIMEOUT_DEFAULT_MSECS	3000
+#define MAX_NAME_LENG			64
 #define DRIVER_NAME 			"dma_proxy"
-#define TX_CHANNEL			0
-#define RX_CHANNEL			1
+#define TX_CHANNEL				0
+#define RX_CHANNEL				1
 #define ERROR 					-1
-#define TEST_SIZE 			1024
+#define TEST_SIZE 				1024
 
 /* The following module parameter controls if the internal test runs when the module is inserted.
  * Note that this test requires a transmit and receive channel to function and uses the first
@@ -144,6 +146,7 @@ struct proxy_bd {
 	dma_addr_t dma_handle;
 	struct scatterlist sglist;
 };
+
 struct dma_proxy_channel {
 	struct channel_buffer *buffer_table_p;	/* user to kernel space interface */
 	dma_addr_t buffer_phys_addr;
@@ -157,10 +160,15 @@ struct dma_proxy_channel {
 	struct proxy_bd bdtable[BUFFER_COUNT];
 
 	struct dma_chan *channel_p;				/* dma support */
+	char name[MAX_NAME_LENG];				/* channel name */
+
 	u32 direction;						/* DMA_MEM_TO_DEV or DMA_DEV_TO_MEM */
+	unsigned int timeout;				/* DMA transfer timeout */
+
 	int bdindex;
 };
 
+/* platform device struct of dma-proxy */
 struct dma_proxy {
 	int channel_count;
 	struct dma_proxy_channel *channels;
@@ -203,7 +211,7 @@ static void start_transfer(struct dma_proxy_channel *pchannel_p)
 						pchannel_p->direction, flags, NULL);
 
 	if (!chan_desc) {
-		printk(KERN_ERR "dmaengine_prep*() error\n");
+		printk(KERN_ERR "%s: dmaengine_prep*() error\n", pchannel_p->name);
 	} else {
 		chan_desc->callback = sync_callback;
 		chan_desc->callback_param = &pchannel_p->bdtable[bdindex].cmp;
@@ -216,7 +224,7 @@ static void start_transfer(struct dma_proxy_channel *pchannel_p)
 
 		pchannel_p->bdtable[bdindex].cookie = dmaengine_submit(chan_desc);
 		if (dma_submit_error(pchannel_p->bdtable[bdindex].cookie)) {
-			printk("Submit error\n");
+			printk(KERN_ERR "%s: Submit error\n", pchannel_p->name);
 	 		return;
 		}
 
@@ -230,9 +238,10 @@ static void start_transfer(struct dma_proxy_channel *pchannel_p)
  */
 static void wait_for_transfer(struct dma_proxy_channel *pchannel_p)
 {
-	unsigned long timeout = msecs_to_jiffies(3000);
+	unsigned long timeout = msecs_to_jiffies(pchannel_p->timeout);
 	enum dma_status status;
 	int bdindex = pchannel_p->bdindex;
+	struct dma_tx_state	state;
 
 	pchannel_p->buffer_table_p[bdindex].status = PROXY_BUSY;
 
@@ -240,16 +249,22 @@ static void wait_for_transfer(struct dma_proxy_channel *pchannel_p)
 	 */
 	timeout = wait_for_completion_timeout(&pchannel_p->bdtable[bdindex].cmp, timeout);
 	status = dma_async_is_tx_complete(pchannel_p->channel_p, pchannel_p->bdtable[bdindex].cookie, NULL, NULL);
-
-	if (timeout == 0)  {
+	
+	/* Need to check that how many items transfer not success */
+	dmaengine_tx_status(pchannel_p->channel_p, pchannel_p->bdtable[bdindex].cookie, &state);
+	pchannel_p->buffer_table_p[bdindex].residue = state.residue;
+	
+	if (timeout == 0) {
 		pchannel_p->buffer_table_p[bdindex].status  = PROXY_TIMEOUT;
-		printk(KERN_ERR "DMA timed out\n");
+		printk(KERN_WARNING "%s: DMA timed out, residue: %u\n", pchannel_p->name, state.residue);
 	} else if (status != DMA_COMPLETE) {
 		pchannel_p->buffer_table_p[bdindex].status = PROXY_ERROR;
-		printk(KERN_ERR "DMA returned completion callback status of: %s\n",
-			   status == DMA_ERROR ? "error" : "in progress");
-	} else
+		printk(KERN_ERR "%s: DMA returned completion callback status of: %s\n",
+			   pchannel_p->name, status == DMA_ERROR ? "error" : "in progress");
+	} else {
 		pchannel_p->buffer_table_p[bdindex].status = PROXY_NO_ERROR;
+		//printk(KERN_INFO "%s: DMA_COMPLETE, residue: %u\n", pchannel_p->name, state.residue);
+	}
 }
 
 /* The following functions are designed to test the driver from within the device
@@ -312,7 +327,7 @@ static void test(struct dma_proxy *lp)
 
 /* Map the memory for the channel interface into user space such that user space can
  * access it using coherent memory which will be non-cached for s/w coherent systems
- * such as Zynq 7K or the current default for Zynq MPSOC. MPSOC can be h/w coherent
+ * such as Zynq 7K or the current default for Zynq MPSoC. MPSoC can be h/w coherent
  * when set up and then the memory will be cached.
  */
 static int mmap(struct file *file_p, struct vm_area_struct *vma)
@@ -354,39 +369,213 @@ static int release(struct inode *ino, struct file *file)
 
 /* Perform I/O control to perform a DMA transfer using the input as an index
  * into the buffer descriptor table such that the application is in control of
- * which buffer to use for the transfer.The BD in this case is only a s/w
+ * which buffer to use for the transfer. The BD in this case is only a s/w
  * structure for the proxy driver, not related to the hw BD of the DMA.
  */
 static long ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct dma_proxy_channel *pchannel_p = (struct dma_proxy_channel *)file->private_data;
+	int value = 0;
 
-	/* Get the bd index from the input argument as all commands require it
+	/* Get the bd index or timeout from the input argument as all commands require it
 	 */
-	if(copy_from_user(&pchannel_p->bdindex, (int *)arg, sizeof(pchannel_p->bdindex)))
+	if(copy_from_user(&value, (int *)arg, sizeof(value))) {
+		printk(KERN_ERR "%s: ioctl(), invalid argument\n", pchannel_p->name);
 		return -EINVAL;
+	}
+
+	if(value < 0) {
+		printk(KERN_ERR "%s: invalid ioctl parameter\n", pchannel_p->name);
+		return -EINVAL;
+	}
 
 	/* Perform the DMA transfer on the specified channel blocking til it completes
 	 */
 	switch(cmd) {
 		case START_XFER:
+			pchannel_p->bdindex = value;
 			start_transfer(pchannel_p);
 			break;
 		case FINISH_XFER:
+			pchannel_p->bdindex = value;
 			wait_for_transfer(pchannel_p);
 			break;
 		case XFER:
+			pchannel_p->bdindex = value;
 			start_transfer(pchannel_p);
 			wait_for_transfer(pchannel_p);
+			break;
+		case TIMEOUT_XFER:
+			printk(KERN_INFO "DMA transfer timeout set: %d msec\n", value);
+			pchannel_p->timeout = (unsigned int)value;
 			break;
 	}
 
 	return 0;
 }
 
+static ssize_t read(struct file *file, char __user *userbuf, size_t count, loff_t *f_pos)
+{
+	ssize_t rc = 0;
+	int read_size = 0;
+	unsigned long ret = 0;
+	struct dma_proxy_channel *pchannel_p = (struct dma_proxy_channel *)file->private_data;
+	int bytes_count = count;
+	int bytes_sum = 0;
+	int bytes_rem = 0;
+	int size_byte = 0;
+	unsigned long length_byte = 0;
+	int i = 0, bd = 0;
+
+	/* ToDo: somehow need to get the information about the TX/RX direction from channel */
+	//if (DMA_DEV_TO_MEM != pchannel_p->direction) {
+	//	printk(KERN_ERR ": %s: can't read, it is a TX device\n", pchannel_p->name);
+	//	return -EINVAL;
+	//}
+
+	while(bytes_sum < bytes_count)
+	{
+		bytes_rem = bytes_count - bytes_sum;
+		if (bytes_rem < BUFFER_SIZE)
+		{
+			size_byte = bytes_rem;
+		}
+		else
+		{
+			size_byte = BUFFER_SIZE;
+		}
+		
+		pchannel_p->buffer_table_p[bd].length = size_byte;
+		pchannel_p->bdindex = bd;
+		
+		start_transfer(pchannel_p);
+		wait_for_transfer(pchannel_p);
+
+		length_byte = pchannel_p->buffer_table_p[bd].length - pchannel_p->buffer_table_p[bd].residue;
+		
+		if (length_byte > 0)
+		{
+			ret = copy_to_user(&userbuf[read_size], pchannel_p->buffer_table_p[bd].buffer, length_byte);
+			if(ret != 0)
+			{
+				printk(KERN_ERR "%s: can't read() DMA buffer, could not be copied %lu bytes\n", pchannel_p->name, ret);
+				return -EPERM;
+			}
+			read_size += length_byte;
+		}
+
+		if (pchannel_p->buffer_table_p[bd].status == PROXY_NO_ERROR)
+		{
+			bytes_sum = read_size;
+			i++;
+			bd = i % BUFFER_COUNT;
+		}
+		else
+		{
+			/* finish, force to break while loop */
+			bytes_sum = bytes_count;
+		}
+	}
+	
+	if (read_size == 0)
+	{
+		printk(KERN_ERR "%s: can't read(), no data and timeout or error occurred\n", pchannel_p->name);
+		return -EPERM;
+	}
+	
+	rc = read_size;
+	return rc;
+}
+
+static ssize_t write(struct file *file, const char __user *userbuf, size_t count, loff_t *f_pos)
+{
+	ssize_t rc = 0;
+	unsigned long ret = 0;
+	int write_size = 0;
+	enum proxy_status bd_status = PROXY_NO_ERROR;
+	struct dma_proxy_channel *pchannel_p = (struct dma_proxy_channel *)file->private_data;
+	int bytes_count = count;
+	int bytes_sum = 0;
+	int bytes_rem = 0;
+	int size_byte = 0;
+	int i = 0, bd = 0;
+	int bd_last = 0;
+
+	/* ToDo: somehow need to get the information about the TX/RX direction from channel */
+	//if (DMA_MEM_TO_DEV != pchannel_p->direction) {
+	//	printk(KERN_ERR "%s: can't write, it is an RX device\n", pchannel_p->name);
+	//	return -EINVAL;
+	//}
+
+	while(bytes_sum < bytes_count)
+	{
+		bytes_rem = bytes_count - bytes_sum;
+		if (bytes_rem < BUFFER_SIZE)
+		{
+			size_byte = bytes_rem;
+		}
+		else
+		{
+			size_byte = BUFFER_SIZE;
+		}
+		
+		ret = copy_from_user(pchannel_p->buffer_table_p[bd].buffer, &userbuf[bytes_sum], size_byte);
+		if(ret != 0)
+		{
+			printk(KERN_ERR "%s: can't write() DMA buffer, could not be copied %lu bytes\n", pchannel_p->name, ret);
+			return -EPERM;
+		}
+		
+		pchannel_p->buffer_table_p[bd].length = size_byte;
+		pchannel_p->bdindex = bd;
+		bd_last = bd;
+		
+		start_transfer(pchannel_p);
+		
+		i++;
+		write_size += size_byte;
+		bd = i % BUFFER_COUNT;
+		
+		if (write_size == bytes_count)
+		{
+			/* end of DMA transfer */
+			wait_for_transfer(pchannel_p);
+			bd_status = pchannel_p->buffer_table_p[bd_last].status;
+		}
+		else if (i >= BUFFER_COUNT)
+		{
+			/* all buffer are busy, need to wait for next free */
+			pchannel_p->bdindex = bd;
+			wait_for_transfer(pchannel_p);
+			bd_status = pchannel_p->buffer_table_p[bd].status;
+		}
+
+		if (bd_status == PROXY_NO_ERROR)
+		{
+			bytes_sum = write_size;
+		}
+		else
+		{
+			/* finish, force to break while loop */
+			bytes_sum = bytes_count;
+		}
+	}
+
+	if (bd_status != PROXY_NO_ERROR)
+	{
+		printk(KERN_ERR "%s: can't write(), no data and timeout or error occurred\n", pchannel_p->name);
+		return -EPERM;
+	}
+	
+	rc = write_size;
+	return rc;
+}
+
 static struct file_operations dm_fops = {
 	.owner    = THIS_MODULE,
 	.open     = local_open,
+	.read     = read,
+	.write    = write,
 	.release  = release,
 	.unlocked_ioctl = ioctl,
 	.mmap	= mmap
@@ -399,7 +588,7 @@ static struct file_operations dm_fops = {
 static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 {
 	int rc;
-	char device_name[32] = "dma_proxy";
+	char device_name[MAX_NAME_LENG] = "dma_proxy";
 	static struct class *local_class_p = NULL;
 
 	/* Allocate a character device from the kernel for this driver.
@@ -507,7 +696,9 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 	if (rc) 
 		return rc;
 
+	strcpy(pchannel_p->name, name);
 	pchannel_p->direction = direction;
+	pchannel_p->timeout = TIMEOUT_DEFAULT_MSECS;
 
 	/* Allocate DMA memory that will be shared/mapped by user space, allocating
 	 * a set of buffers for the channel with user space specifying which buffer
@@ -517,6 +708,11 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 		dmam_alloc_coherent(pchannel_p->dma_device_p,
 					sizeof(struct channel_buffer) * BUFFER_COUNT,
 					&pchannel_p->buffer_phys_addr, GFP_KERNEL);
+	
+	/* ToDo: somehow need to get the information about the TX/RX direction */
+	//printk(KERN_INFO "DMA channel name and direction: %s, %u\n", name, direction);
+	printk(KERN_INFO "DMA channel name: %s\n", name);
+	
 	printk(KERN_INFO "Allocating memory, virtual address: %px physical address: %px\n",
 			pchannel_p->buffer_table_p, (void *)pchannel_p->buffer_phys_addr);
 

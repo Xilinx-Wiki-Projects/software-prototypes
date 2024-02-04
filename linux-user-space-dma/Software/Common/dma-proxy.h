@@ -33,9 +33,11 @@
 #define FINISH_XFER 	_IOW('a','a',int32_t*)
 #define START_XFER 		_IOW('a','b',int32_t*)
 #define XFER 			_IOR('a','c',int32_t*)
+#define TIMEOUT_XFER	_IOW('a','d',int32_t*)
 
 struct channel_buffer {
 	unsigned int buffer[BUFFER_SIZE / sizeof(unsigned int)];
 	enum proxy_status { PROXY_NO_ERROR = 0, PROXY_BUSY = 1, PROXY_TIMEOUT = 2, PROXY_ERROR = 3 } status;
 	unsigned int length;
+	unsigned int residue;
 } __attribute__ ((aligned (1024)));		/* 64 byte alignment required for DMA, but 1024 handy for viewing memory */
