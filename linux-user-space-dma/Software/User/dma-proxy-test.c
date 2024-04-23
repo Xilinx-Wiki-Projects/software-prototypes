@@ -350,9 +350,9 @@ int main(int argc, char *argv[])
 	 * convert it from KB to bytes
 	 */
 	test_size = atoi(argv[2]);
+	test_size *= 1024;
 	if (test_size > BUFFER_SIZE)
 		test_size = BUFFER_SIZE;
-	test_size *= 1024;
 
 	/* Verify is off by default to get pure performance of the DMA transfers without the CPU accessing all the data
 	 * to slow it down.
