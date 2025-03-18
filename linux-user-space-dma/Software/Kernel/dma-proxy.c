@@ -428,8 +428,14 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	 * in /dev to be created
 	 */
 	if (!local_class_p) {
+		//Fix extracted from https://community.intel.com/t5/Analyzers/redhat9-5-14-0-kernal-header-changes-break-sepdk-build/m-p/1605880
+		// from 6.4, class_create changed
+		//https://web.git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1aaba11da9aa7d7d6b52a74d45b31cac118295a1
+		#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+		local_class_p = class_create(DRIVER_NAME);
+		#else
 		local_class_p = class_create(THIS_MODULE, DRIVER_NAME);
-
+		#endif
 		if (IS_ERR(pchannel_p->dma_device_p->class)) {
 			dev_err(pchannel_p->dma_device_p, "unable to create class\n");
 			rc = ERROR;
