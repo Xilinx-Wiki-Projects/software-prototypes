@@ -428,7 +428,12 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	 * in /dev to be created
 	 */
 	if (!local_class_p) {
-		local_class_p = class_create(THIS_MODULE, DRIVER_NAME);
+		local_class_p = class_create(
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6, 3, 13)
+                            THIS_MODULE,
+#endif
+                            DRIVER_NAME
+                            );
 
 		if (IS_ERR(pchannel_p->dma_device_p->class)) {
 			dev_err(pchannel_p->dma_device_p, "unable to create class\n");
