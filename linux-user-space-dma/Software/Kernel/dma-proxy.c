@@ -125,7 +125,6 @@ MODULE_LICENSE("GPL");
 #define DRIVER_NAME 			"dma_proxy"
 #define TX_CHANNEL			0
 #define RX_CHANNEL			1
-#define ERROR 					-1
 #define TEST_SIZE 			1024
 
 /* The following module parameter controls if the internal test runs when the module is inserted.
@@ -195,9 +194,11 @@ static void start_transfer(struct dma_proxy_channel *pchannel_p)
 	/* A single entry scatter gather list is used as it's not clear how to do it with a simpler method.
 	 * Get a descriptor for the transfer ready to submit
 	 */
-	sg_init_table(&pchannel_p->bdtable[bdindex].sglist, 1);
-	sg_dma_address(&pchannel_p->bdtable[bdindex].sglist) = pchannel_p->bdtable[bdindex].dma_handle;
-	sg_dma_len(&pchannel_p->bdtable[bdindex].sglist) = pchannel_p->buffer_table_p[bdindex].length;
+    sg_init_one(
+        &pchannel_p->bdtable[bdindex].sglist,
+        (void*)pchannel_p->bdtable[bdindex].dma_handle,
+        pchannel_p->buffer_table_p[bdindex].length
+        );
 
 	chan_desc = dma_device->device_prep_slave_sg(pchannel_p->channel_p, &pchannel_p->bdtable[bdindex].sglist, 1, 
 						pchannel_p->direction, flags, NULL);
@@ -216,7 +217,7 @@ static void start_transfer(struct dma_proxy_channel *pchannel_p)
 
 		pchannel_p->bdtable[bdindex].cookie = dmaengine_submit(chan_desc);
 		if (dma_submit_error(pchannel_p->bdtable[bdindex].cookie)) {
-			printk("Submit error\n");
+			printk(KERN_ERR "Submit error\n");
 	 		return;
 		}
 
@@ -274,7 +275,7 @@ static void test(struct dma_proxy *lp)
 {
 	int i;
 
-	printk("Starting internal test\n");
+	printk(KERN_INFO "Starting internal test\n");
 
 	/* Initialize the buffers for the test
 	 */
@@ -303,11 +304,11 @@ static void test(struct dma_proxy *lp)
 	for (i = 0; i < TEST_SIZE / sizeof(unsigned int); i++)
 		if (lp->channels[TX_CHANNEL].buffer_table_p[0].buffer[i] !=
 			lp->channels[RX_CHANNEL].buffer_table_p[0].buffer[i]) {
-			printk("buffers not equal, first index = %d\n", i);
+			printk(KERN_ERR "buffers not equal, first index = %d\n", i);
 			break;
 		}
 
-	printk("Internal test complete\n");
+	printk(KERN_INFO "Internal test complete\n");
 }
 
 /* Map the memory for the channel interface into user space such that user space can
@@ -405,7 +406,6 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	/* Allocate a character device from the kernel for this driver.
 	 */
 	rc = alloc_chrdev_region(&pchannel_p->dev_node, 0, 1, "dma_proxy");
-
 	if (rc) {
 		dev_err(pchannel_p->dma_device_p, "unable to get a char device number\n");
 		return rc;
@@ -417,7 +417,6 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	cdev_init(&pchannel_p->cdev, &dm_fops);
 	pchannel_p->cdev.owner = THIS_MODULE;
 	rc = cdev_add(&pchannel_p->cdev, pchannel_p->dev_node, 1);
-
 	if (rc) {
 		dev_err(pchannel_p->dma_device_p, "unable to add char device\n");
 		goto init_error1;
@@ -428,20 +427,23 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	 * in /dev to be created
 	 */
 	if (!local_class_p) {
-		local_class_p = class_create(
+        local_class_p = class_create(
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(6, 3, 13)
-                            THIS_MODULE,
+                                 THIS_MODULE,
 #endif
-                            DRIVER_NAME
-                            );
-
-		if (IS_ERR(pchannel_p->dma_device_p->class)) {
+                                 DRIVER_NAME
+                                 );
+        pchannel_p->class_p = local_class_p;
+		if (IS_ERR_OR_NULL(local_class_p)) {
 			dev_err(pchannel_p->dma_device_p, "unable to create class\n");
-			rc = ERROR;
+            if(!local_class_p) {
+                return -ENOMEM;
+            } else {
+                return ERR_PTR(local_class_p);
+            }
 			goto init_error2;
 		}
 	}
-	pchannel_p->class_p = local_class_p;
 
 	/* Create the device node in /dev so the device is accessible
 	 * as a character device
@@ -449,8 +451,7 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	strcat(device_name, name);
 	pchannel_p->proxy_device_p = device_create(pchannel_p->class_p, NULL,
 					  	 pchannel_p->dev_node, NULL, name);
-
-	if (IS_ERR(pchannel_p->proxy_device_p)) {
+	if (IS_ERR_OR_NULL(pchannel_p->proxy_device_p)) {
 		dev_err(pchannel_p->dma_device_p, "unable to create the device\n");
 		goto init_error3;
 	}
@@ -458,7 +459,8 @@ static int cdevice_init(struct dma_proxy_channel *pchannel_p, char *name)
 	return 0;
 
 init_error3:
-	class_destroy(pchannel_p->class_p);
+	class_destroy(local_class_p);
+    local_class_p = NULL;
 
 init_error2:
 	cdev_del(&pchannel_p->cdev);
@@ -501,9 +503,13 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 	 */
 	pchannel_p->dma_device_p = &pdev->dev;
 	pchannel_p->channel_p = dma_request_chan(&pdev->dev, name);
-	if (!pchannel_p->channel_p) {
-		dev_err(pchannel_p->dma_device_p, "DMA channel request error\n");
-		return ERROR;
+	if (IS_ERR_OR_NULL(pchannel_p->channel_p)) {
+		dev_err(pchannel_p->dma_device_p, "DMA channel request error: %s\n",name);
+        if(!pchannel_p->channel_p) {
+            return -ENODEV;
+        } else {
+            return PTR_ERR(pchannel_p->channel_p);
+        }
 	}
 
 	/* Initialize the character device for the dma proxy channel
@@ -522,24 +528,30 @@ static int create_channel(struct platform_device *pdev, struct dma_proxy_channel
 		dmam_alloc_coherent(pchannel_p->dma_device_p,
 					sizeof(struct channel_buffer) * BUFFER_COUNT,
 					&pchannel_p->buffer_phys_addr, GFP_KERNEL);
+	if (IS_ERR_OR_NULL(pchannel_p->buffer_table_p)) {
+		dev_err(pchannel_p->dma_device_p, "DMA allocation error\n");
+        if(!pchannel_p->buffer_table_p) {
+            return -ENOMEM;
+        } else {
+            return PTR_ERR(pchannel_p->buffer_table_p);
+        }
+	}
 	printk(KERN_INFO "Allocating memory, virtual address: %px physical address: %px\n",
 			pchannel_p->buffer_table_p, (void *)pchannel_p->buffer_phys_addr);
 
 	/* Initialize each entry in the buffer descriptor table such that the physical address	
 	 * address of each buffer is ready to use later.
 	 */
-	for (bd = 0; bd < BUFFER_COUNT; bd++) 
+	for (bd = 0; bd < BUFFER_COUNT; bd++) {
 		pchannel_p->bdtable[bd].dma_handle = (dma_addr_t)(pchannel_p->buffer_phys_addr + 
 						(sizeof(struct channel_buffer) * bd) + offsetof(struct channel_buffer, buffer));
+		printk(KERN_INFO "\t%d: %px\n",bd,(void*)pchannel_p->bdtable[bd].dma_handle);
+    }
 
 	/* The buffer descriptor index into the channel buffers should be specified in each 
 	 * ioctl but we will initialize it to be safe.
 	 */
 	pchannel_p->bdindex = 0;
-	if (!pchannel_p->buffer_table_p) {
-		dev_err(pchannel_p->dma_device_p, "DMA allocation error\n");
-		return ERROR;
-	}
 	return 0;
 }
 /* Initialize the dma proxy device driver module.
@@ -553,9 +565,13 @@ static int dma_proxy_probe(struct platform_device *pdev)
 	printk(KERN_INFO "dma_proxy module initialized\n");
 	
 	lp = (struct dma_proxy *) devm_kmalloc(&pdev->dev, sizeof(struct dma_proxy), GFP_KERNEL);
-	if (!lp) {
+	if (IS_ERR_OR_NULL(lp)) {
 		dev_err(dev, "Cound not allocate proxy device\n");
-		return -ENOMEM;
+        if(!lp) {
+            return -ENOMEM;
+        } else {
+            return PTR_ERR(lp);
+        }
 	}
 	dev_set_drvdata(dev, lp);
 
@@ -567,15 +583,21 @@ static int dma_proxy_probe(struct platform_device *pdev)
 	if (lp->channel_count <= 0)
 		return 0;
 
-	printk("Device Tree Channel Count: %d\r\n", lp->channel_count);
+	printk(KERN_INFO "Device Tree Channel Count: %d\r\n", lp->channel_count);
 
 	/* Allocate the memory for channel names and then get the names
     * from the device tree
 	 */
 	lp->names = devm_kmalloc_array(&pdev->dev, lp->channel_count, 
 			sizeof(char *), GFP_KERNEL);
-	if (!lp->names)
-		return -ENOMEM;
+	if (IS_ERR_OR_NULL(lp->names)) {
+		dev_err(dev, "Cound not allocate names\n");
+        if(!lp->names) {
+            return -ENOMEM;
+        } else {
+            return PTR_ERR(lp->names);
+        }
+    }
 
 	rc = device_property_read_string_array(&pdev->dev, "dma-names", 
 					(const char **)lp->names, lp->channel_count);
@@ -586,15 +608,20 @@ static int dma_proxy_probe(struct platform_device *pdev)
 	 */
 	lp->channels = devm_kmalloc(&pdev->dev,
 			sizeof(struct dma_proxy_channel) * lp->channel_count, GFP_KERNEL);
-	if (!lp->channels)
-		return -ENOMEM;
+	if (IS_ERR_OR_NULL(lp->channels)) {
+        if(!lp->channels) {
+            return -ENOMEM;
+        } else {
+            return PTR_ERR(lp->channels);
+        }
+    }
 
 	/* Create the channels in the proxy. The direction does not matter
 	 * as the DMA channel has it inside it and uses it, other than this will not work 
 	 * for cyclic mode.
 	 */
 	for (i = 0; i < lp->channel_count; i++) {
-		printk("Creating channel %s\r\n", lp->names[i]);
+		printk(KERN_INFO "Creating channel %s\r\n", lp->names[i]);
 		rc = create_channel(pdev, &lp->channels[i], lp->names[i], DMA_MEM_TO_DEV);
 
 		if (rc) 
