@@ -194,11 +194,16 @@ static void start_transfer(struct dma_proxy_channel *pchannel_p)
 	/* A single entry scatter gather list is used as it's not clear how to do it with a simpler method.
 	 * Get a descriptor for the transfer ready to submit
 	 */
-    sg_init_one(
-        &pchannel_p->bdtable[bdindex].sglist,
-        (void*)pchannel_p->bdtable[bdindex].dma_handle,
-        pchannel_p->buffer_table_p[bdindex].length
-        );
+	sg_init_one(&pchannel_p->bdtable[bdindex].sglist,
+		(void*)pchannel_p->bdtable[baindex].dma_handle,
+		pchannel_p->buffer_table_p[bdindex].length);
+
+	n = dma_map_sg(dma_device->dev, &pchannel_p->bdtable[bdindex].sglist,
+		1, DMA_FROM_DEVICE);
+	if (n != 1) {
+		printk(KERN_ERR "DMA mapping failed\n");
+		return;
+	}
 
 	chan_desc = dma_device->device_prep_slave_sg(pchannel_p->channel_p, &pchannel_p->bdtable[bdindex].sglist, 1, 
 						pchannel_p->direction, flags, NULL);
