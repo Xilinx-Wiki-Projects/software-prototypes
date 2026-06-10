@@ -55,6 +55,7 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/param.h>
+#include <string.h>
 
 #include "dma-proxy.h"
 
@@ -112,8 +113,9 @@ static uint64_t get_posix_clock_time_usec ()
  * The following function is the transmit thread to allow the transmit and the receive channels to be
  * operating simultaneously. Some of the ioctl calls are blocking so that multiple threads are required.
  */
-void tx_thread(struct channel *channel_ptr)
+void* tx_thread(void* px)
 {
+    struct channel *channel_ptr = (struct channel*)px;
 	int i, counter = 0, buffer_id, in_progress_count = 0;
 	int stop_in_progress = 0;
 
@@ -204,10 +206,12 @@ end_tx_loop0:
 		buffer_id += BUFFER_INCREMENT;
 		buffer_id %= TX_BUFFER_COUNT;
 	}
+    return (void*)0;
 }
 
-void rx_thread(struct channel *channel_ptr)
+void* rx_thread(void* px)
 {
+    struct channel *channel_ptr = (struct channel*)px;
 	int in_progress_count = 0, buffer_id = 0;
 	int rx_counter = 0;
 
@@ -248,7 +252,7 @@ void rx_thread(struct channel *channel_ptr)
 		 * A unique value in the buffers is used across all transfers
 		 */
 		if (verify) {
-			unsigned int *buffer = &channel_ptr->buf_ptr[buffer_id].buffer;
+			unsigned int *buffer = (unsigned int*)&channel_ptr->buf_ptr[buffer_id].buffer;
 			int i;
 			for (i = 0; i < 1; i++) // test_size / sizeof(unsigned int); i++) this is slow
 				if (buffer[i] != i + rx_counter) {
@@ -290,6 +294,7 @@ void rx_thread(struct channel *channel_ptr)
 		buffer_id %= RX_BUFFER_COUNT;
 
 	}
+    return (void*)0;
 }
 
 /*******************************************************************************************************************/
@@ -338,7 +343,7 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sigint);
 
 	if ((argc != 3) && (argc != 4)) {
-		printf("Usage: dma-proxy-test <# of DMA transfers to perform> <# of bytes in each transfer in KB (< 1MB)> <optional verify, 0 or 1>\n");
+		printf("Usage: %s <# of DMA transfers to perform> <# of bytes in each transfer in KB (< 1MB)> <optional verify, 0 or 1>\n",argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
@@ -350,9 +355,9 @@ int main(int argc, char *argv[])
 	 * convert it from KB to bytes
 	 */
 	test_size = atoi(argv[2]);
+	test_size *= 1024;
 	if (test_size > BUFFER_SIZE)
 		test_size = BUFFER_SIZE;
-	test_size *= 1024;
 
 	/* Verify is off by default to get pure performance of the DMA transfers without the CPU accessing all the data
 	 * to slow it down.
@@ -377,6 +382,7 @@ int main(int argc, char *argv[])
 			printf("Failed to mmap tx channel\n");
 			exit(EXIT_FAILURE);
 		}
+        printf("TX#%d: %lx\n",i,tx_channels[i].buf_ptr);
 	}
 
 	/* Open the file descriptors for each rx channel and map the kernel driver memory into user space */
@@ -395,6 +401,7 @@ int main(int argc, char *argv[])
 			printf("Failed to mmap rx channel\n");
 			exit(EXIT_FAILURE);
 		}
+        printf("RX#%d: %lx\n",i,rx_channels[i].buf_ptr);
 	}
 
 	/* Grab the start time to calculate performance then start the threads & transfers on all channels */
