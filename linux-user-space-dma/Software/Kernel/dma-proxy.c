@@ -533,7 +533,7 @@ static void cdevice_exit(struct dma_proxy_channel *pChannel)
      * from how it was created for the char device
      */
     if(pChannel->pProxyDevice) {
-        device_destroy(pChannel->pDmaProxy->pClass,pChannel->pDmaProxy->dev_node);
+        device_destroy(pChannel->pDmaProxy->pClass, pChannel->cdev.dev);
 
         cdev_del(&pChannel->cdev);
     }
